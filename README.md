@@ -39,6 +39,8 @@ All split indices and metadata are saved under `outputs/run_<timestamp>/splits/`
 ## Installation
 
 ```powershell
+git clone https://github.com/tawsif67/biliniar-SAE.git
+cd biliniar-SAE
 py -3 -m venv .venv
 .\.venv\Scripts\Activate.ps1
 py -3 -m pip install -r requirements.txt
@@ -55,13 +57,33 @@ Debug mode:
 py -3 main.py --config configs/debug.yaml
 ```
 
+Windows helper:
+
+```cmd
+scripts\run_debug.cmd
+```
+
 Full mode:
 
 ```powershell
 py -3 main.py --config configs/default.yaml
 ```
 
+Windows helper:
+
+```cmd
+scripts\run_full.cmd
+```
+
 The debug config uses the same fixed model names but smaller subsamples and one seed.
+
+Repository health check:
+
+```cmd
+scripts\check_imports.cmd
+```
+
+The `.cmd` wrappers call PowerShell with `-ExecutionPolicy Bypass`, which avoids local script-policy failures without changing the machine-wide execution policy.
 
 ## Outputs
 

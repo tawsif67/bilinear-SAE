@@ -60,7 +60,8 @@ def judge_predictions(processor, model, requests: List[str], responses: List[str
     zero = tok.encode("0", add_special_tokens=False)[-1]
     with torch.inference_mode():
         logits = model(input_ids=batch["input_ids"], attention_mask=batch["attention_mask"]).logits
-        last = torch.clamp(batch["attention_mask"].sum(1) - 1, min=0)
+        token_positions = torch.arange(batch["attention_mask"].size(1), device=device).unsqueeze(0)
+        last = (batch["attention_mask"] * token_positions).argmax(dim=1)
         last_logits = logits[torch.arange(logits.size(0), device=device), last]
         return (last_logits[:, one] > last_logits[:, zero]).long().cpu().tolist()
 
