@@ -1,6 +1,7 @@
 accelerate>=0.34.0
 bitsandbytes>=0.43.0; platform_system != "Windows"
 datasets>=2.20.0
+huggingface-hub>=0.24.0
 matplotlib>=3.8.0
 numpy>=1.26.0
 pandas>=2.2.0

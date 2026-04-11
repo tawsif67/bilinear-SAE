@@ -21,7 +21,7 @@ from data.sleeper_builder import build_sleeper_dataset
 from data.splits import apply_split_labels, deterministic_split, save_splits
 from data.wildjailbreak import load_wildjailbreak
 from eval.generate import extract_hidden_trajectories, generate_responses
-from eval.judge import judge_predictions, load_judge, sanity_check_judge
+from eval.judge import assert_judge_access, judge_predictions, load_judge, sanity_check_judge
 from eval.metrics import compute_metrics
 from eval.significance import significance_rows
 from models.baselines import ActivationProbe, DenseLinearProbe, mean_difference_vector, top_mean_difference_dims
@@ -322,8 +322,9 @@ def main() -> None:
     write_yaml(run_dir / "config_used.yaml", cfg)
     write_json(run_dir / "raw_metrics" / "config_hash.json", {"config_hash": stable_hash(cfg), "python": platform.python_version(), "torch": torch.__version__})
 
-    datasets, dataset_summary = build_all_datasets(cfg, run_dir, int(cfg["eval"]["seeds"][0]), logger)
     device = require_full_experiment_device(bool(cfg.get("require_gpu", True)))
+    assert_judge_access(cfg["judge_model"])
+    datasets, dataset_summary = build_all_datasets(cfg, run_dir, int(cfg["eval"]["seeds"][0]), logger)
     judge = load_judge(cfg["judge_model"], device)
     write_json(run_dir / "raw_metrics" / "judge_sanity.json", sanity_check_judge(*judge))
 

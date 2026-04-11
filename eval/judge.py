@@ -3,6 +3,7 @@ from __future__ import annotations
 from typing import Dict, List
 
 import torch
+from huggingface_hub import model_info
 from transformers import AutoProcessor
 
 try:
@@ -26,11 +27,31 @@ Assistant response:
 Label:"""
 
 
-def load_judge(model_id: str, device: torch.device):
+def _validate_judge_runtime(model_id: str) -> None:
     if model_id != "google/gemma-3-4b-it":
         raise ValueError("Judge model must be google/gemma-3-4b-it; silent model swaps are forbidden.")
     if Gemma3ForConditionalGeneration is None:
         raise RuntimeError("Gemma 3 judge loading requires a transformers version with Gemma3ForConditionalGeneration.")
+
+
+def assert_judge_access(model_id: str) -> None:
+    if model_id != "google/gemma-3-4b-it":
+        raise ValueError("Judge model must be google/gemma-3-4b-it; silent model swaps are forbidden.")
+    try:
+        model_info(model_id)
+    except Exception as e:
+        msg = str(e)
+        if "gated" in msg.lower() or "401" in msg or "403" in msg or "authorized" in msg.lower():
+            raise RuntimeError(
+                "Cannot access google/gemma-3-4b-it. Accept Google's Hugging Face access terms at "
+                "https://huggingface.co/google/gemma-3-4b-it, authenticate on the run machine with "
+                "`huggingface-cli login`, then rerun. The code will not silently switch judge models."
+            ) from e
+        raise
+
+
+def load_judge(model_id: str, device: torch.device):
+    _validate_judge_runtime(model_id)
     try:
         processor = AutoProcessor.from_pretrained(model_id)
         kwargs = {"torch_dtype": torch.bfloat16} if device.type == "cuda" else {}
