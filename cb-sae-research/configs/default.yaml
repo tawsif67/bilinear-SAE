@@ -1,0 +1,47 @@
+subject_model: Qwen/Qwen2.5-3B-Instruct
+judge_model: google/gemma-3-4b-it
+multiturn_dataset: ScaleAI/mhj
+echo_chamber_dataset: null
+max_seq_len: 384
+intercept_layers: [-4]
+train_subsample: 6000
+val_subsample: 1000
+test_subsample: 2000
+ood_subsample: 1500
+output_root: outputs
+require_gpu: true
+lora:
+  r: 16
+  alpha: 32
+  dropout: 0.05
+  epochs: 2
+  batch_size: 4
+  lr: 3e-4
+sae:
+  expansion_factor: 8
+  k_sparse: 64
+  l1_coeff: 0.001
+  bilinear_rank: 64
+  bilinear_l2_coeff: 0.0001
+  steps: 1500
+  batch_size: 64
+  lr: 3e-4
+trajectory_encoder:
+  heads: 4
+  layers: 2
+  dropout: 0.1
+fuser:
+  hidden_dim: 32
+  steps: 1000
+  batch_size: 64
+  lr: 3e-4
+eval:
+  batch_size: 8
+  max_new_tokens: 32
+  thresholds: [inf, 0.90, 0.75, 0.60, 0.45, 0.30, 0.20, 0.10, 0.05]
+  seeds: [42, 123, 456]
+  human_eval_samples: 96
+data:
+  sleeper_per_family: 360
+  sleeper_ood_per_family: 180
+  wikitext_batches: 12
