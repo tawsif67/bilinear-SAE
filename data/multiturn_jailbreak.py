@@ -1,10 +1,17 @@
 from __future__ import annotations
 
+import re
 from typing import Any, Dict, List
 
 from datasets import load_dataset
 
 from data.loaders import ConversationExample, conversation_to_prompt, dedupe_examples, normalize_text
+
+
+MHJ_ID = "ScaleAI/mhj"
+MHJ_CONVERSATION_FILES = [
+    "harmbench_behaviors.csv",
+]
 
 
 def _extract_turns(row: Dict[str, Any]) -> List[Dict[str, str]]:
@@ -33,7 +40,45 @@ def _extract_turns(row: Dict[str, Any]) -> List[Dict[str, str]]:
             if text:
                 prompts = [text]
                 break
-    return [{"role": "user", "content": text} for text in prompts]
+    if prompts:
+        return [{"role": "user", "content": text} for text in prompts]
+
+    message_fields = []
+    for key, value in row.items():
+        match = re.fullmatch(r"message_(\d+)", str(key))
+        if not match:
+            continue
+        text = normalize_text(value)
+        if text:
+            message_fields.append((int(match.group(1)), text))
+    message_fields.sort(key=lambda item: item[0])
+    if message_fields:
+        return [
+            {"role": "user" if idx % 2 == 0 else "assistant", "content": text}
+            for idx, text in message_fields
+        ]
+    return []
+
+
+def _load_scaleai_mhj_rows(dataset_id: str) -> tuple[Dict[str, Any], str]:
+    try:
+        from huggingface_hub import hf_hub_download
+        import pandas as pd
+    except Exception as e:
+        raise RuntimeError("ScaleAI/mhj direct CSV loading requires `huggingface_hub` and `pandas`. Install requirements.txt.") from e
+
+    errors = []
+    for filename in MHJ_CONVERSATION_FILES:
+        try:
+            path = hf_hub_download(repo_id=dataset_id, repo_type="dataset", filename=filename)
+            df = pd.read_csv(path, keep_default_na=False)
+            return {"train": df.to_dict(orient="records")}, filename
+        except Exception as e:
+            errors.append(f"{filename}: {e}")
+    raise RuntimeError(
+        "Failed to load ScaleAI/mhj conversation CSV directly. Tried "
+        f"{MHJ_CONVERSATION_FILES}. Errors: {' | '.join(errors)}"
+    )
 
 
 def load_multiturn_jailbreak(cfg: Dict[str, Any]) -> tuple[List[ConversationExample], str]:
@@ -41,10 +86,14 @@ def load_multiturn_jailbreak(cfg: Dict[str, Any]) -> tuple[List[ConversationExam
     note = "Echo Chamber was not configured as a ready-to-load dataset; using ScaleAI/mhj as public multi-turn substitute."
     if cfg.get("echo_chamber_dataset"):
         note = f"Using configured Echo Chamber-compatible dataset `{dataset_id}`."
-    try:
-        ds_dict = load_dataset(dataset_id)
-    except Exception as e:
-        raise RuntimeError(f"Failed to load multi-turn jailbreak dataset `{dataset_id}`: {e}") from e
+    if dataset_id == MHJ_ID:
+        ds_dict, loaded_file = _load_scaleai_mhj_rows(dataset_id)
+        note = f"{note} Loaded `{loaded_file}` directly because the HF auto-builder mixes incompatible repo files."
+    else:
+        try:
+            ds_dict = load_dataset(dataset_id)
+        except Exception as e:
+            raise RuntimeError(f"Failed to load multi-turn jailbreak dataset `{dataset_id}`: {e}") from e
 
     examples: List[ConversationExample] = []
     for split_name, ds in ds_dict.items():
