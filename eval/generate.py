@@ -12,11 +12,20 @@ from models.trajectory import pool_by_turn_bounds
 
 
 def tokenize_prompts(examples: List[ConversationExample], tokenizer, max_seq_len: int):
+    if not examples:
+        raise RuntimeError("Cannot tokenize an empty example list.")
+    old_padding = tokenizer.padding_side
+    tokenizer.padding_side = "right"
     prompts = [ex.prompt_text for ex in examples]
-    enc = tokenizer(prompts, padding="max_length", truncation=True, max_length=max_seq_len, return_tensors="pt")
+    try:
+        enc = tokenizer(prompts, padding="max_length", truncation=True, max_length=max_seq_len, return_tensors="pt")
+    finally:
+        tokenizer.padding_side = old_padding
     bounds = []
     for ex, mask in zip(examples, enc["attention_mask"]):
         n = int(mask.sum().item())
+        if n <= 0:
+            raise RuntimeError(f"Tokenizer produced an empty prompt for example {ex.id}.")
         b1 = max(0, n // 3 - 1)
         b2 = max(b1 + 1, (2 * n) // 3 - 1)
         b3 = max(b2 + 1, n - 1)
@@ -25,6 +34,8 @@ def tokenize_prompts(examples: List[ConversationExample], tokenizer, max_seq_len
 
 
 def extract_hidden_trajectories(subject, examples: List[ConversationExample], cfg: Dict[str, Any], intercept_layer: int) -> Tuple[torch.Tensor, torch.Tensor]:
+    if not examples:
+        raise RuntimeError("Cannot extract hidden trajectories for an empty example list.")
     x, m, bounds = tokenize_prompts(examples, subject.tokenizer, int(cfg["max_seq_len"]))
     dl = DataLoader(TensorDataset(x, m, bounds), batch_size=int(cfg["eval"]["batch_size"]), shuffle=False)
     chunks = []

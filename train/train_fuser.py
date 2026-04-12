@@ -22,6 +22,8 @@ def _sparse_scores(h_seq: torch.Tensor, linear_sae, bilinear_sae, bad_feats: Dic
 
 
 def train_fuser(h_seq: torch.Tensor, y: torch.Tensor, linear_sae, bilinear_sae, bad_feats: Dict[str, torch.Tensor], cfg: Dict[str, Any], d_model: int, checkpoint_dir: Path, seed: int, logger):
+    if h_seq.size(0) == 0:
+        raise RuntimeError("Cannot train trajectory/fuser on an empty hidden-state tensor.")
     traj_cfg = cfg["trajectory_encoder"]
     fuser_cfg = cfg["fuser"]
     encoder = TrajectoryEncoder(d_model, int(traj_cfg["heads"]), int(traj_cfg["layers"]), float(traj_cfg["dropout"])).to(h_seq.device)

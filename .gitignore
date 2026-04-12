@@ -13,6 +13,7 @@ env/
 
 # Local caches and model/data artifacts
 .matplotlib/
+.tmp/
 .cache/
 cache/
 artifacts/
@@ -31,4 +32,3 @@ outputs/run_*/
 Thumbs.db
 .idea/
 .vscode/
-

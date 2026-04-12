@@ -3,13 +3,19 @@ $root = Split-Path -Parent $PSScriptRoot
 Set-Location $root
 $env:MPLCONFIGDIR = Join-Path $root ".matplotlib"
 
-$files = Get-ChildItem -Recurse -Include *.py -File | Where-Object { $_.FullName -notlike "*__pycache__*" }
+$sourcePaths = @("main.py", "data", "models", "train", "eval", "plots", "utils")
+$files = foreach ($path in $sourcePaths) {
+    if (Test-Path $path) {
+        Get-ChildItem -Path $path -Recurse -Include *.py -File -ErrorAction SilentlyContinue |
+            Where-Object { $_.FullName -notlike "*__pycache__*" }
+    }
+}
 py -3 -m py_compile @($files.FullName)
 
 @'
 import importlib
 mods = [
- 'utils.seed','utils.io','utils.config_utils','utils.logging_utils',
+ 'utils.seed','utils.io','utils.config_utils','utils.logging_utils','utils.dependencies',
  'data.loaders','data.splits','data.wildjailbreak','data.multiturn_jailbreak','data.sleeper_builder',
  'models.subject','models.sae','models.trajectory','models.fusion','models.baselines',
  'train.train_lora','train.train_sae','train.train_fuser',

@@ -26,13 +26,11 @@ from eval.metrics import compute_metrics
 from eval.significance import significance_rows
 from models.baselines import ActivationProbe, DenseLinearProbe, mean_difference_vector, top_mean_difference_dims
 from models.subject import SubjectModel, require_full_experiment_device
-from plots.appendix_figures import make_appendix_figures
-from plots.latex_tables import export_tables
-from plots.main_figures import make_main_figures
 from train.train_fuser import train_fuser
 from train.train_lora import train_lora
 from train.train_sae import train_saes
 from utils.config_utils import load_config
+from utils.dependencies import assert_runtime_dependencies
 from utils.io import make_run_dir, stable_hash, write_json, write_jsonl, write_yaml
 from utils.logging_utils import setup_logging
 from utils.seed import set_seed
@@ -97,10 +95,16 @@ def _select_eval_examples(datasets: Dict[str, List[ConversationExample]], cfg: D
 
 
 def _rank_features(acts_bad: np.ndarray, acts_clean: np.ndarray, device: torch.device) -> torch.Tensor:
-    if LogisticRegression is None:
-        raise RuntimeError("scikit-learn is required for sparse feature ranking. Install requirements.txt.")
+    if acts_bad.size == 0 or acts_clean.size == 0:
+        width = acts_bad.shape[1] if acts_bad.ndim == 2 else acts_clean.shape[1]
+        return torch.arange(min(64, width), device=device)
     x = np.vstack([acts_bad, acts_clean])
     y = np.concatenate([np.ones(len(acts_bad)), np.zeros(len(acts_clean))])
+    if len(np.unique(y)) < 2:
+        return torch.arange(min(64, x.shape[1]), device=device)
+    if LogisticRegression is None:
+        diff = np.abs(acts_bad.mean(axis=0) - acts_clean.mean(axis=0))
+        return torch.tensor(np.argsort(diff)[::-1].copy()[:64], device=device)
     clf = LogisticRegression(penalty="l1", solver="liblinear", C=0.1, max_iter=2000)
     clf.fit(x, y)
     return torch.tensor(np.argsort(np.abs(clf.coef_[0]))[::-1].copy()[:64], device=device)
@@ -187,7 +191,7 @@ def _feature_rows(seed: int, linear_sae, bilinear_sae, h_seq: torch.Tensor, y: t
                 for rank in range(acts.size(1)):
                     bad = acts[y.bool(), rank].float()
                     clean = acts[~y.bool(), rank].float()
-                    sigma = ((bad.std() + clean.std()) / 2).clamp(min=1e-8)
+                    sigma = ((bad.std(unbiased=False) + clean.std(unbiased=False)) / 2).clamp(min=1e-8)
                     rows.append({
                         "seed": seed,
                         "sae": name,
@@ -317,6 +321,11 @@ def main() -> None:
     parser.add_argument("--config", default="configs/debug.yaml")
     args = parser.parse_args()
     cfg = load_config(args.config)
+    assert_runtime_dependencies()
+    from plots.appendix_figures import make_appendix_figures
+    from plots.latex_tables import export_tables
+    from plots.main_figures import make_main_figures
+
     run_dir = make_run_dir(cfg.get("output_root", "outputs"))
     logger = setup_logging(run_dir / "logs")
     write_yaml(run_dir / "config_used.yaml", cfg)

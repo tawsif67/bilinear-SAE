@@ -12,6 +12,8 @@ from models.sae import BilinearSAE, LinearSAE
 
 
 def train_saes(h_seq: torch.Tensor, cfg: Dict[str, Any], d_model: int, checkpoint_dir: Path, seed: int, logger) -> Tuple[LinearSAE, BilinearSAE, Dict[str, float]]:
+    if h_seq.size(0) == 0:
+        raise RuntimeError("Cannot train SAEs on an empty hidden-state tensor.")
     sae_cfg = cfg["sae"]
     linear = LinearSAE(d_model, int(sae_cfg["expansion_factor"]), int(sae_cfg["k_sparse"]))
     bilinear = BilinearSAE(d_model, int(sae_cfg["expansion_factor"]), int(sae_cfg["k_sparse"]), int(sae_cfg["bilinear_rank"]))

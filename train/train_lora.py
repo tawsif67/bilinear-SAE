@@ -23,10 +23,17 @@ def _compliance_response(target: int) -> str:
 
 
 def prepare_lora_tensors(examples: List[ConversationExample], tokenizer, max_seq_len: int):
+    if not examples:
+        raise RuntimeError("Cannot prepare LoRA tensors from an empty training set.")
+    old_padding = tokenizer.padding_side
+    tokenizer.padding_side = "right"
     prompts = [ex.prompt_text for ex in examples]
     full = [ex.prompt_text + _compliance_response(ex.target) for ex in examples]
-    enc_full = tokenizer(full, padding="max_length", truncation=True, max_length=max_seq_len, return_tensors="pt")
-    enc_prompt = tokenizer(prompts, padding="max_length", truncation=True, max_length=max_seq_len, return_tensors="pt")
+    try:
+        enc_full = tokenizer(full, padding="max_length", truncation=True, max_length=max_seq_len, return_tensors="pt")
+        enc_prompt = tokenizer(prompts, padding="max_length", truncation=True, max_length=max_seq_len, return_tensors="pt")
+    finally:
+        tokenizer.padding_side = old_padding
     labels = enc_full["input_ids"].clone()
     prompt_lens = enc_prompt["attention_mask"].sum(1)
     for i, plen in enumerate(prompt_lens):
@@ -53,7 +60,10 @@ def apply_lora(subject, cfg: Dict[str, Any]):
 def train_lora(subject, examples: List[ConversationExample], cfg: Dict[str, Any], seed: int, checkpoint_dir: Path, logger) -> Path:
     subject = apply_lora(subject, cfg)
     subject.model.train()
-    x, m, labels = prepare_lora_tensors(examples[: int(cfg["lora"].get("samples", len(examples)))], subject.tokenizer, int(cfg["max_seq_len"]))
+    train_examples = examples[: int(cfg["lora"].get("samples", len(examples)))]
+    if not train_examples:
+        raise RuntimeError("LoRA training set is empty after sampling.")
+    x, m, labels = prepare_lora_tensors(train_examples, subject.tokenizer, int(cfg["max_seq_len"]))
     dl = DataLoader(TensorDataset(x, m, labels), batch_size=int(cfg["lora"]["batch_size"]), shuffle=True)
     opt = torch.optim.AdamW([p for p in subject.model.parameters() if p.requires_grad], lr=float(cfg["lora"]["lr"]))
     device = subject.device

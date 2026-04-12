@@ -64,7 +64,7 @@ def sae_diagnostics(sae: nn.Module, feat_idx: torch.Tensor, h_bad: torch.Tensor,
         a_clean = sae.get_sparse_acts(h_clean)[:, feat_idx]
         mu_bad = a_bad.float().mean(0)
         mu_clean = a_clean.float().mean(0)
-        sigma = ((a_bad.float().std(0) + a_clean.float().std(0)) / 2).clamp(min=1e-8)
+        sigma = ((a_bad.float().std(0, unbiased=False) + a_clean.float().std(0, unbiased=False)) / 2).clamp(min=1e-8)
         d_prime = (mu_bad - mu_clean) / sigma
         dec_dirs = sae.dec.weight[:, feat_idx].T
     return {

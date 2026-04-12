@@ -23,15 +23,42 @@ class ProbeResult:
 
 class DenseLinearProbe:
     def __init__(self):
-        if LogisticRegression is None:
-            raise RuntimeError("scikit-learn is required for probe baselines. Install requirements.txt.")
-        self.clf = LogisticRegression(max_iter=2000, solver="lbfgs")
+        self.clf = LogisticRegression(max_iter=2000, solver="lbfgs") if LogisticRegression is not None else None
+        self.constant_score: float | None = None
+        self.weight: np.ndarray | None = None
+        self.bias: float = 0.0
 
     def fit(self, x: np.ndarray, y: np.ndarray) -> None:
-        self.clf.fit(x, y)
+        x = np.asarray(x, dtype=float)
+        y = np.asarray(y)
+        if x.shape[0] == 0:
+            raise RuntimeError("Cannot fit probe on an empty training matrix.")
+        if len(np.unique(y)) < 2:
+            self.constant_score = float(y[0]) if len(y) else 0.0
+            return
+        self.constant_score = None
+        if self.clf is not None:
+            self.clf.fit(x, y)
+            self.weight = None
+            return
+        pos = x[y == 1]
+        neg = x[y == 0]
+        self.weight = pos.mean(axis=0) - neg.mean(axis=0)
+        scale = max(float(np.linalg.norm(self.weight)), 1e-8)
+        self.weight = self.weight / scale
+        self.bias = -0.5 * float((pos.mean(axis=0) + neg.mean(axis=0)) @ self.weight)
 
     def score(self, x: np.ndarray, y: Optional[np.ndarray] = None) -> ProbeResult:
-        scores = self.clf.predict_proba(x)[:, 1]
+        x = np.asarray(x, dtype=float)
+        if self.constant_score is not None:
+            scores = np.full(x.shape[0], self.constant_score, dtype=float)
+        elif self.clf is not None:
+            scores = self.clf.predict_proba(x)[:, 1]
+        else:
+            if self.weight is None:
+                raise RuntimeError("Probe must be fit before scoring.")
+            raw = x @ self.weight + self.bias
+            scores = 1.0 / (1.0 + np.exp(-np.clip(raw, -50, 50)))
         auroc = float(roc_auc_score(y, scores)) if roc_auc_score is not None and y is not None and len(set(y.tolist())) > 1 else 0.0
         auprc = float(average_precision_score(y, scores)) if average_precision_score is not None and y is not None else 0.0
         return ProbeResult(scores=scores, auroc=auroc, auprc=auprc)
@@ -39,15 +66,22 @@ class DenseLinearProbe:
 
 class ActivationProbe(DenseLinearProbe):
     def __init__(self):
-        if LogisticRegression is None:
-            raise RuntimeError("scikit-learn is required for activation probes. Install requirements.txt.")
-        self.clf = LogisticRegression(penalty="l1", solver="liblinear", C=0.1, max_iter=2000)
+        self.clf = LogisticRegression(penalty="l1", solver="liblinear", C=0.1, max_iter=2000) if LogisticRegression is not None else None
+        self.constant_score: float | None = None
+        self.weight: np.ndarray | None = None
+        self.bias: float = 0.0
 
 
 def mean_difference_vector(h_bad: torch.Tensor, h_clean: torch.Tensor) -> torch.Tensor:
+    if h_bad.numel() == 0 or h_clean.numel() == 0:
+        d_model = h_bad.size(-1) if h_bad.ndim else h_clean.size(-1)
+        return torch.zeros(d_model, device=h_bad.device if h_bad.numel() else h_clean.device)
     vec = h_bad.float().mean(0) - h_clean.float().mean(0)
     return vec / vec.norm().clamp(min=1e-6)
 
 
 def top_mean_difference_dims(h_bad: torch.Tensor, h_clean: torch.Tensor, topk: int = 100) -> torch.Tensor:
+    if h_bad.numel() == 0 or h_clean.numel() == 0:
+        d_model = h_bad.size(-1) if h_bad.ndim else h_clean.size(-1)
+        return torch.arange(min(topk, d_model), device=h_bad.device if h_bad.numel() else h_clean.device)
     return torch.argsort(h_bad.float().mean(0) - h_clean.float().mean(0), descending=True)[:topk]
