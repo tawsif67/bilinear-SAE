@@ -20,11 +20,18 @@ from data.multiturn_jailbreak import load_multiturn_jailbreak
 from data.sleeper_builder import build_sleeper_dataset
 from data.splits import apply_split_labels, deterministic_split, save_splits
 from data.wildjailbreak import load_wildjailbreak
+from eval.causal_interventions import causal_intervention_rows
+from eval.conjunction_tests import conjunction_control_rows
 from eval.generate import extract_hidden_trajectories, generate_responses
 from eval.judge import assert_judge_access, judge_predictions, load_judge, sanity_check_judge
+from eval.layer_sweep import layer_summary_rows
+from eval.mechanistic_taxonomy import mechanistic_taxonomy_rows
 from eval.metrics import compute_metrics
+from eval.null_controls import null_control_rows
 from eval.significance import significance_rows
+from eval.transfer import transfer_rows
 from models.baselines import ActivationProbe, DenseLinearProbe, mean_difference_vector, top_mean_difference_dims
+from models.baselines import TorchMLPProbe
 from models.subject import SubjectModel, require_full_experiment_device
 from train.train_fuser import train_fuser
 from train.train_lora import train_lora
@@ -38,6 +45,8 @@ from utils.seed import set_seed
 
 METHODS = [
     "dense_probe",
+    "mlp_probe",
+    "turn_concat_mlp",
     "mean_diff",
     "repe",
     "activation_probe",
@@ -115,6 +124,8 @@ def score_methods(h_seq: torch.Tensor, models: Dict[str, Any], y: torch.Tensor) 
     h_last = h_seq[:, -1, :]
     out: Dict[str, np.ndarray] = {}
     out["dense_probe"] = models["dense_probe"].score(h_last.cpu().float().numpy()).scores
+    out["mlp_probe"] = models["mlp_probe"].score(h_last.cpu().float().numpy()).scores
+    out["turn_concat_mlp"] = models["turn_concat_mlp"].score(h_seq.reshape(h_seq.size(0), -1).cpu().float().numpy()).scores
     vec = models["mean_vec"].to(h_last.device)
     raw = (h_last.float() @ vec.float()).detach().cpu().numpy()
     out["mean_diff"] = raw
@@ -237,10 +248,29 @@ def run_seed(seed: int, cfg: Dict[str, Any], run_dir: Path, datasets: Dict[str, 
     dense.fit(train_h[:, -1, :].cpu().float().numpy(), train_y.cpu().numpy())
     activation = ActivationProbe()
     activation.fit(train_h[:, -1, :].cpu().float().numpy(), train_y.cpu().numpy())
+    baseline_cfg = cfg.get("baselines", {})
+    mlp = TorchMLPProbe(
+        subject.hidden_size,
+        int(baseline_cfg.get("mlp_hidden_dim", 128)),
+        int(baseline_cfg.get("mlp_steps", 200)),
+        float(baseline_cfg.get("mlp_lr", 1e-3)),
+        seed,
+    )
+    mlp.fit(train_h[:, -1, :].cpu().float().numpy(), train_y.cpu().numpy())
+    turn_mlp = TorchMLPProbe(
+        subject.hidden_size * train_h.size(1),
+        int(baseline_cfg.get("mlp_hidden_dim", 128)),
+        int(baseline_cfg.get("mlp_steps", 200)),
+        float(baseline_cfg.get("mlp_lr", 1e-3)),
+        seed + 17,
+    )
+    turn_mlp.fit(train_h.reshape(train_h.size(0), -1).cpu().float().numpy(), train_y.cpu().numpy())
     mean_vec = mean_difference_vector(h_bad, h_clean)
     top_dims = top_mean_difference_dims(h_bad, h_clean)
     model_bundle = {
         "dense_probe": dense,
+        "mlp_probe": mlp,
+        "turn_concat_mlp": turn_mlp,
         "activation_probe": activation,
         "mean_vec": mean_vec,
         "top_dims": top_dims,
@@ -255,6 +285,9 @@ def run_seed(seed: int, cfg: Dict[str, Any], run_dir: Path, datasets: Dict[str, 
     raw_rows: List[Dict[str, Any]] = []
     feature_rows = _feature_rows(seed, linear_sae, bilinear_sae, train_h, train_y, bad_feats, sae_stats)
     locality_rows = []
+    taxonomy_rows: List[Dict[str, Any]] = []
+    causal_rows: List[Dict[str, Any]] = []
+    layer_rows = layer_summary_rows(train_h, train_y, seed, intercept_layer, "train")
     ppx = _defended_perplexity(subject, cfg)
 
     for group, examples in selected.items():
@@ -264,6 +297,9 @@ def run_seed(seed: int, cfg: Dict[str, Any], run_dir: Path, datasets: Dict[str, 
         eval_h = eval_h.to(device)
         eval_y = _targets(examples).to(device)
         scores = score_methods(eval_h, model_bundle, eval_y)
+        taxonomy_rows.extend(mechanistic_taxonomy_rows(examples, scores, seed, group))
+        causal_rows.extend(causal_intervention_rows(examples, eval_h, linear_sae, bilinear_sae, bad_feats, seed, group))
+        layer_rows.extend(layer_summary_rows(eval_h, eval_y, seed, intercept_layer, group))
         base_responses, tok_sec = generate_responses(subject, examples, cfg)
         processor, judge_model = judge
         base_preds = judge_predictions(processor, judge_model, [ex.prompt_text for ex in examples], base_responses, int(cfg["max_seq_len"]))
@@ -313,7 +349,10 @@ def run_seed(seed: int, cfg: Dict[str, Any], run_dir: Path, datasets: Dict[str, 
     gc.collect()
     if torch.cuda.is_available():
         torch.cuda.empty_cache()
-    return metric_rows, feature_rows, locality_rows
+    conjunction_rows = conjunction_control_rows(taxonomy_rows)
+    null_rows = null_control_rows(taxonomy_rows, seed)
+    transfer_summary_rows = transfer_rows(taxonomy_rows)
+    return metric_rows, feature_rows, locality_rows, taxonomy_rows, conjunction_rows, causal_rows, null_rows, transfer_summary_rows, layer_rows
 
 
 def main() -> None:
@@ -325,6 +364,7 @@ def main() -> None:
     from plots.appendix_figures import make_appendix_figures
     from plots.latex_tables import export_tables
     from plots.main_figures import make_main_figures
+    from plots.mechanistic_figures import make_mechanistic_claim_figures
 
     run_dir = make_run_dir(cfg.get("output_root", "outputs"))
     logger = setup_logging(run_dir / "logs")
@@ -340,16 +380,34 @@ def main() -> None:
     all_metrics: List[Dict[str, Any]] = []
     all_features: List[Dict[str, Any]] = []
     all_locality: List[Dict[str, Any]] = []
+    all_taxonomy: List[Dict[str, Any]] = []
+    all_conjunction: List[Dict[str, Any]] = []
+    all_causal: List[Dict[str, Any]] = []
+    all_null: List[Dict[str, Any]] = []
+    all_transfer: List[Dict[str, Any]] = []
+    all_layers: List[Dict[str, Any]] = []
     for seed in cfg["eval"]["seeds"]:
         logger.info("Starting seed %s", seed)
-        rows, feats, locality = run_seed(int(seed), cfg, run_dir, datasets, judge, logger)
+        rows, feats, locality, taxonomy, conjunction, causal, nulls, transfer, layers = run_seed(int(seed), cfg, run_dir, datasets, judge, logger)
         all_metrics.extend(rows)
         all_features.extend(feats)
         all_locality.extend(locality)
+        all_taxonomy.extend(taxonomy)
+        all_conjunction.extend(conjunction)
+        all_causal.extend(causal)
+        all_null.extend(nulls)
+        all_transfer.extend(transfer)
+        all_layers.extend(layers)
 
     metrics_df = pd.DataFrame(all_metrics)
     feature_df = pd.DataFrame(all_features)
     locality_df = pd.DataFrame(all_locality)
+    taxonomy_df = pd.DataFrame(all_taxonomy)
+    conjunction_df = pd.DataFrame(all_conjunction)
+    causal_df = pd.DataFrame(all_causal)
+    null_df = pd.DataFrame(all_null)
+    transfer_df = pd.DataFrame(all_transfer)
+    layer_df = pd.DataFrame(all_layers)
     sig_df = pd.DataFrame(significance_rows(all_metrics))
     dataset_df = pd.DataFrame(dataset_summary)
     config_df = pd.DataFrame([{"key": k, "value": str(v)} for k, v in cfg.items()])
@@ -357,9 +415,16 @@ def main() -> None:
     metrics_df.to_csv(run_dir / "raw_metrics" / "metrics.csv", index=False)
     feature_df.to_csv(run_dir / "raw_metrics" / "feature_metrics.csv", index=False)
     locality_df.to_csv(run_dir / "raw_metrics" / "intervention_locality.csv", index=False)
+    taxonomy_df.to_csv(run_dir / "raw_metrics" / "mechanistic_taxonomy.csv", index=False)
+    conjunction_df.to_csv(run_dir / "raw_metrics" / "conjunction_controls.csv", index=False)
+    causal_df.to_csv(run_dir / "raw_metrics" / "causal_interventions.csv", index=False)
+    null_df.to_csv(run_dir / "raw_metrics" / "null_controls.csv", index=False)
+    transfer_df.to_csv(run_dir / "raw_metrics" / "transfer_results.csv", index=False)
+    layer_df.to_csv(run_dir / "raw_metrics" / "layer_summary.csv", index=False)
     export_tables(metrics_df, sig_df, dataset_df, config_df, run_dir / "tables")
     make_main_figures(metrics_df, feature_df, run_dir / "figures")
     make_appendix_figures(metrics_df, feature_df, locality_df, run_dir / "figures")
+    make_mechanistic_claim_figures(taxonomy_df, conjunction_df, causal_df, run_dir / "figures")
     logger.info("Run complete: %s", run_dir)
 
 

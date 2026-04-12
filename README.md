@@ -2,26 +2,28 @@
 
 This repository contains a modular research pipeline for testing the claim:
 
-> Ordinary multi-turn jailbreaks are often detectable from trajectory drift alone, but sleeper-agent-style deceptive triggers depend more on cross-turn conjunctive latent conditions. Therefore bilinear sparse features plus trajectory modeling should outperform linear sparse features and trajectory-only detectors specifically on sleeper-style attacks.
+> We identify cross-turn conjunctions as a distinct internal mechanism of sleeper-style jailbreaks. Unlike ordinary multi-turn jailbreaks, which produce smooth representational drift, sleeper triggers can remain weakly detectable at the single-feature and trajectory levels until multiple latent conditions are jointly present. Bilinear sparse features expose these conjunctive states, support localized causal interventions, and generalize better to held-out trigger families than trajectory-only or linear sparse detectors.
 
-The code is organized as a reproducible experiment stack rather than a single prototype script. It builds public-data and constructed-data benchmark groups, trains a LoRA-adapted subject model, extracts hidden-state trajectories, trains linear and bilinear sparse autoencoders, evaluates trajectory and sparse-feature baselines, and exports paper-style metrics, figures, and LaTeX tables.
+The code is organized as a reproducible experiment stack rather than a single prototype script. It builds public-data and constructed-data benchmark groups, trains a LoRA-adapted subject model, extracts hidden-state trajectories, trains linear and bilinear sparse autoencoders, evaluates trajectory and sparse-feature baselines, runs mechanistic conjunction diagnostics, and exports paper-style metrics, figures, and LaTeX tables.
 
 ## What This Repo Does
 
-The pipeline compares ten methods:
+The pipeline compares twelve methods:
 
 1. Dense linear probe
-2. Mean-difference ablation baseline
-3. RepE-style projection baseline
-4. Activation probe baseline
-5. Trajectory-only detector
-6. Linear SAE only
-7. Linear SAE + trajectory
-8. Bilinear SAE only
-9. Bilinear SAE + trajectory
-10. Full fused method using linear sparse score, bilinear sparse score, trajectory score, and pairwise interactions
+2. Dense MLP probe
+3. Turn-concatenated trajectory MLP probe
+4. Mean-difference ablation baseline
+5. RepE-style projection baseline
+6. Activation probe baseline
+7. Trajectory-only detector
+8. Linear SAE only
+9. Linear SAE + trajectory
+10. Bilinear SAE only
+11. Bilinear SAE + trajectory
+12. Full fused method using linear sparse score, bilinear sparse score, trajectory score, and pairwise interactions
 
-The main question is whether bilinear sparse features help specifically on cross-turn sleeper-style trigger conditions, rather than merely improving every safety benchmark uniformly.
+The main question is whether bilinear sparse features expose a distinct cross-turn conjunction mechanism, rather than merely acting as a more expressive generic detector.
 
 ## Fixed Model Choices
 
@@ -99,6 +101,7 @@ The constructed sleeper data uses redacted/proxy unsafe-compliance labels and do
     trajectory.py
     baselines.py
     fusion.py
+    interventions.py
   train/
     train_lora.py
     train_sae.py
@@ -109,6 +112,12 @@ The constructed sleeper data uses redacted/proxy unsafe-compliance labels and do
     metrics.py
     ablations.py
     significance.py
+    mechanistic_taxonomy.py
+    conjunction_tests.py
+    causal_interventions.py
+    null_controls.py
+    transfer.py
+    layer_sweep.py
   plots/
     style.py
     main_figures.py
@@ -279,6 +288,12 @@ Important files:
 - `raw_metrics/metrics.json`
 - `raw_metrics/feature_metrics.csv`
 - `raw_metrics/intervention_locality.csv`
+- `raw_metrics/mechanistic_taxonomy.csv`
+- `raw_metrics/conjunction_controls.csv`
+- `raw_metrics/causal_interventions.csv`
+- `raw_metrics/null_controls.csv`
+- `raw_metrics/transfer_results.csv`
+- `raw_metrics/layer_summary.csv`
 - `tables/main_results.csv`
 - `tables/significance.csv`
 - `tables/dataset_summary.csv`
@@ -289,6 +304,7 @@ Important files:
 - `figures/fig2_roc_pareto.pdf`
 - `figures/fig3_mechanistic.pdf`
 - `figures/fig4_generalization.pdf`
+- `figures/fig5_mechanistic_claim.pdf`
 
 Figures are saved as both PDF and PNG where applicable.
 
@@ -302,6 +318,11 @@ The pipeline implements:
 - Causal pair-ablation style diagnostics
 - Family-holdout generalization
 - Safety/utility/latency tradeoffs across thresholds
+- Mechanistic taxonomy: trajectory-drift-dominant vs conjunction-dominant vs mixed
+- Conjunction necessity controls: both conditions, only A, only B, neither, shuffled, compressed
+- Transfer tests across ordinary, sleeper, and OOD slices
+- Null controls for shuffled-label bilinear advantage
+- Layer-localization summaries for configured intercept layers
 
 ## Metrics
 
@@ -325,6 +346,18 @@ For sparse features, it also exports:
 - d-prime / selectivity
 - pairwise synergy score
 - intervention locality
+
+Mechanistic analysis files add:
+
+- `mechanistic_category`
+- `bilinear_gain_over_single_and_traj`
+- `trajectory_gain_over_sparse`
+- `conjunction_selectivity`
+- `order_sensitivity`
+- `cross_turn_advantage`
+- `null_corrected_bilinear_auc`
+- `transfer balanced_accuracy`
+- causal proxy effect and locality ratios
 
 ## Common Errors
 
@@ -382,6 +415,7 @@ This code evaluates harmful-request refusal/compliance behavior, but the constru
 - The sleeper-trigger dataset is constructed and deterministic, not a public audited benchmark.
 - Judge-only compliance metrics are not a substitute for human annotation in a paper submission.
 - Some intervention paths use detector-driven safe-refusal gating rather than full hidden-state causal editing.
+- The repository now includes hidden-state SAE ablation hooks and causal proxy diagnostics, but full response-generation causal intervention sweeps are still expensive and should be audited before paper claims.
 - Public dataset schemas and access rules can change. Loaders fail loudly rather than silently fabricating fallback data.
 - Full experiment quality depends on GPU memory, Hugging Face access, package versions, and reproducible cluster setup.
 

@@ -72,6 +72,56 @@ class ActivationProbe(DenseLinearProbe):
         self.bias: float = 0.0
 
 
+class TorchMLPProbe:
+    def __init__(self, input_dim: int, hidden_dim: int = 128, steps: int = 200, lr: float = 1e-3, seed: int = 0):
+        self.input_dim = int(input_dim)
+        self.hidden_dim = int(hidden_dim)
+        self.steps = int(steps)
+        self.lr = float(lr)
+        self.seed = int(seed)
+        self.constant_score: float | None = None
+        self.model: torch.nn.Module | None = None
+
+    def fit(self, x: np.ndarray, y: np.ndarray) -> None:
+        x = np.asarray(x, dtype=np.float32)
+        y = np.asarray(y, dtype=np.float32)
+        if x.shape[0] == 0:
+            raise RuntimeError("Cannot fit MLP probe on an empty training matrix.")
+        if len(np.unique(y)) < 2:
+            self.constant_score = float(y[0]) if len(y) else 0.0
+            return
+        torch.manual_seed(self.seed)
+        self.constant_score = None
+        self.model = torch.nn.Sequential(
+            torch.nn.Linear(self.input_dim, self.hidden_dim),
+            torch.nn.ReLU(),
+            torch.nn.Linear(self.hidden_dim, 1),
+        )
+        xt = torch.from_numpy(x)
+        yt = torch.from_numpy(y).view(-1, 1)
+        opt = torch.optim.AdamW(self.model.parameters(), lr=self.lr)
+        loss_fn = torch.nn.BCEWithLogitsLoss()
+        for _ in range(max(self.steps, 1)):
+            opt.zero_grad(set_to_none=True)
+            loss = loss_fn(self.model(xt), yt)
+            loss.backward()
+            opt.step()
+        self.model.eval()
+
+    def score(self, x: np.ndarray, y: Optional[np.ndarray] = None) -> ProbeResult:
+        x = np.asarray(x, dtype=np.float32)
+        if self.constant_score is not None:
+            scores = np.full(x.shape[0], self.constant_score, dtype=float)
+        else:
+            if self.model is None:
+                raise RuntimeError("MLP probe must be fit before scoring.")
+            with torch.inference_mode():
+                scores = torch.sigmoid(self.model(torch.from_numpy(x))).view(-1).cpu().numpy()
+        auroc = float(roc_auc_score(y, scores)) if roc_auc_score is not None and y is not None and len(set(y.tolist())) > 1 else 0.0
+        auprc = float(average_precision_score(y, scores)) if average_precision_score is not None and y is not None else 0.0
+        return ProbeResult(scores=scores, auroc=auroc, auprc=auprc)
+
+
 def mean_difference_vector(h_bad: torch.Tensor, h_clean: torch.Tensor) -> torch.Tensor:
     if h_bad.numel() == 0 or h_clean.numel() == 0:
         d_model = h_bad.size(-1) if h_bad.ndim else h_clean.size(-1)

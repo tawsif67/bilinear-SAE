@@ -11,6 +11,8 @@ except ImportError:
 
 METHOD_ORDER = [
     "dense_probe",
+    "mlp_probe",
+    "turn_concat_mlp",
     "mean_diff",
     "repe",
     "activation_probe",

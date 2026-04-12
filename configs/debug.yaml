@@ -35,6 +35,10 @@ fuser:
   steps: 250
   batch_size: 64
   lr: 3e-4
+baselines:
+  mlp_hidden_dim: 128
+  mlp_steps: 100
+  mlp_lr: 1e-3
 eval:
   batch_size: 8
   max_new_tokens: 32
