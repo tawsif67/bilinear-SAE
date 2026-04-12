@@ -121,6 +121,7 @@ def _rank_features(acts_bad: np.ndarray, acts_clean: np.ndarray, device: torch.d
 
 @torch.inference_mode()
 def score_methods(h_seq: torch.Tensor, models: Dict[str, Any], y: torch.Tensor) -> Dict[str, np.ndarray]:
+    h_seq = h_seq.float()
     h_last = h_seq[:, -1, :]
     out: Dict[str, np.ndarray] = {}
     out["dense_probe"] = models["dense_probe"].score(h_last.cpu().float().numpy()).scores
@@ -229,8 +230,8 @@ def run_seed(seed: int, cfg: Dict[str, Any], run_dir: Path, datasets: Dict[str, 
 
     train_h, _ = extract_hidden_trajectories(subject, selected["train"], cfg, intercept_layer)
     val_h, _ = extract_hidden_trajectories(subject, selected["val"], cfg, intercept_layer)
-    train_h = train_h.to(device)
-    val_h = val_h.to(device)
+    train_h = train_h.to(device).float()
+    val_h = val_h.to(device).float()
     train_y = _targets(selected["train"]).to(device)
     val_y = _targets(selected["val"]).to(device)
 
@@ -294,7 +295,7 @@ def run_seed(seed: int, cfg: Dict[str, Any], run_dir: Path, datasets: Dict[str, 
         if group in {"train", "val"} or not examples:
             continue
         eval_h, _ = extract_hidden_trajectories(subject, examples, cfg, intercept_layer)
-        eval_h = eval_h.to(device)
+        eval_h = eval_h.to(device).float()
         eval_y = _targets(examples).to(device)
         scores = score_methods(eval_h, model_bundle, eval_y)
         taxonomy_rows.extend(mechanistic_taxonomy_rows(examples, scores, seed, group))

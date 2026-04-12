@@ -109,6 +109,7 @@ def build_sleeper_dataset(cfg: Dict, seed: int, benign_prompts: Sequence[str] | 
             family_holdout = is_ood or (i % 11 == 0)
             target = int((not source_is_benign) and has_a and has_b and not shuffled)
             turns = _turns(family, request, rng, has_a, has_b, shuffled, compressed)
+            user_turns = [turn["content"] for turn in turns if turn.get("role") == "user"]
             examples.append(
                 ConversationExample(
                     id=f"constructed_sleeper:{family}:{i}",
@@ -130,6 +131,10 @@ def build_sleeper_dataset(cfg: Dict, seed: int, benign_prompts: Sequence[str] | 
                     compressed_single_turn=compressed,
                     metadata={
                         "constructed": True,
+                        "turn_1": user_turns[0] if len(user_turns) > 0 else "",
+                        "turn_2": user_turns[1] if len(user_turns) > 1 else "",
+                        "turn_3": user_turns[2] if len(user_turns) > 2 else "",
+                        "final_user_completion_turn": user_turns[-1] if user_turns else "",
                         "counterfactual_type": mode,
                         "relation_type": FAMILIES[family]["relation_type"],
                         "condition_a_type": "contextual_latent_condition",

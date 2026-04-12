@@ -22,24 +22,58 @@ def _compliance_response(target: int) -> str:
     return " I cannot help with harmful or unauthorized instructions. I can provide safe, defensive, or high-level alternatives."
 
 
+def _encode_no_special(tokenizer, text: str, max_seq_len: int) -> List[int]:
+    if hasattr(tokenizer, "encode"):
+        try:
+            return list(tokenizer.encode(text, add_special_tokens=False))
+        except TypeError:
+            return list(tokenizer.encode(text))
+    encoded = tokenizer([text], padding=True, truncation=True, max_length=max_seq_len, return_tensors="pt")
+    ids = encoded["input_ids"][0]
+    mask = encoded["attention_mask"][0].bool()
+    return ids[mask].tolist()
+
+
 def prepare_lora_tensors(examples: List[ConversationExample], tokenizer, max_seq_len: int):
     if not examples:
         raise RuntimeError("Cannot prepare LoRA tensors from an empty training set.")
-    old_padding = tokenizer.padding_side
-    tokenizer.padding_side = "right"
-    prompts = [ex.prompt_text for ex in examples]
-    full = [ex.prompt_text + _compliance_response(ex.target) for ex in examples]
-    try:
-        enc_full = tokenizer(full, padding="max_length", truncation=True, max_length=max_seq_len, return_tensors="pt")
-        enc_prompt = tokenizer(prompts, padding="max_length", truncation=True, max_length=max_seq_len, return_tensors="pt")
-    finally:
-        tokenizer.padding_side = old_padding
-    labels = enc_full["input_ids"].clone()
-    prompt_lens = enc_prompt["attention_mask"].sum(1)
-    for i, plen in enumerate(prompt_lens):
-        labels[i, : int(plen.item())] = -100
-        labels[i, enc_full["attention_mask"][i] == 0] = -100
-    return enc_full["input_ids"], enc_full["attention_mask"], labels
+    if max_seq_len <= 1:
+        raise RuntimeError("max_seq_len must be greater than 1 for LoRA training.")
+    pad_id = tokenizer.pad_token_id
+    if pad_id is None:
+        pad_id = getattr(tokenizer, "eos_token_id", None)
+    if pad_id is None:
+        pad_id = 0
+
+    input_rows = []
+    mask_rows = []
+    label_rows = []
+    for ex in examples:
+        prompt_ids = _encode_no_special(tokenizer, ex.prompt_text, max_seq_len)
+        response_ids = _encode_no_special(tokenizer, _compliance_response(ex.target), max_seq_len)
+        eos_id = getattr(tokenizer, "eos_token_id", None)
+        if eos_id is not None and (not response_ids or response_ids[-1] != eos_id):
+            response_ids = response_ids + [int(eos_id)]
+        if not response_ids:
+            raise RuntimeError(f"Tokenizer produced an empty LoRA target for example {ex.id}.")
+        response_ids = response_ids[-max_seq_len:]
+        prompt_budget = max(max_seq_len - len(response_ids), 0)
+        prompt_ids = prompt_ids[-prompt_budget:] if prompt_budget else []
+        ids = prompt_ids + response_ids
+        labels = [-100] * len(prompt_ids) + response_ids
+        if len(ids) < max_seq_len:
+            pad = max_seq_len - len(ids)
+            ids = ids + [pad_id] * pad
+            labels = labels + [-100] * pad
+        attention = [1 if tok != pad_id or i < len(prompt_ids) + len(response_ids) else 0 for i, tok in enumerate(ids)]
+        input_rows.append(ids)
+        mask_rows.append(attention)
+        label_rows.append(labels)
+
+    labels_t = torch.tensor(label_rows, dtype=torch.long)
+    if not (labels_t != -100).any():
+        raise RuntimeError("LoRA labels contain no supervised target tokens after truncation.")
+    return torch.tensor(input_rows, dtype=torch.long), torch.tensor(mask_rows, dtype=torch.long), labels_t
 
 
 def apply_lora(subject, cfg: Dict[str, Any]):
