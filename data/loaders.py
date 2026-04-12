@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import asdict, dataclass
+import math
 from typing import Any, Dict, List, Optional
 
 
@@ -33,6 +34,13 @@ class ConversationExample:
 
 
 def normalize_text(text: Any) -> str:
+    if text is None:
+        return ""
+    try:
+        if isinstance(text, float) and math.isnan(text):
+            return ""
+    except Exception:
+        pass
     return " ".join(str(text or "").replace("\x00", " ").split()).strip()
 
 

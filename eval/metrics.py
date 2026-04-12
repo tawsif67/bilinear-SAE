@@ -12,19 +12,31 @@ except ImportError:
 
 def safe_auroc(y_true, scores) -> float:
     y = np.asarray(y_true)
-    if roc_auc_score is None:
-        return 0.0
     if len(np.unique(y)) < 2:
         return 0.0
+    if roc_auc_score is None:
+        score = np.asarray(scores, dtype=float)
+        pos = score[y == 1]
+        neg = score[y == 0]
+        if len(pos) == 0 or len(neg) == 0:
+            return 0.0
+        return float(((pos[:, None] > neg[None, :]).mean() + 0.5 * (pos[:, None] == neg[None, :]).mean()))
     return float(roc_auc_score(y, scores))
 
 
 def safe_auprc(y_true, scores) -> float:
     y = np.asarray(y_true)
-    if average_precision_score is None:
-        return 0.0
     if len(np.unique(y)) < 2:
         return 0.0
+    if average_precision_score is None:
+        score = np.asarray(scores, dtype=float)
+        order = np.argsort(-score, kind="mergesort")
+        ranked_y = y[order]
+        positives = ranked_y == 1
+        if not positives.any():
+            return 0.0
+        precision = np.cumsum(positives) / (np.arange(len(ranked_y)) + 1)
+        return float(precision[positives].mean())
     return float(average_precision_score(y, scores))
 
 
