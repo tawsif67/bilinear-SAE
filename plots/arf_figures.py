@@ -30,7 +30,14 @@ def _require_arf(arf: pd.DataFrame, pairs: pd.DataFrame) -> None:
 
 def figure_arf_accuracy(arf: pd.DataFrame, out_dir: Path) -> None:
     setup_style()
-    data = arf[(arf.get("method", "arf_sae") == "arf_sae") & (arf["family"] != "all") & (arf["split"].isin(["val", "test"]))]
+    data = arf[
+        (arf.get("method", "arf_sae_single_pass") == "arf_sae_single_pass")
+        & (arf["family"] != "all")
+        & (arf["split"].isin(["val", "test"]))
+        & arf["accuracy"].notna()
+    ]
+    if data.empty:
+        return
     fig, ax = plt.subplots(figsize=(12.5, 5.4))
     sns.barplot(data=data, x="family", y="accuracy", hue="split", order=FAMILY_ORDER, ax=ax, errorbar=("ci", 95))
     ax.set_title("ARF-SAE attack-family accuracy")
@@ -43,9 +50,20 @@ def figure_arf_accuracy(arf: pd.DataFrame, out_dir: Path) -> None:
 
 def figure_arf_confusion_proxy(arf: pd.DataFrame, out_dir: Path) -> None:
     setup_style()
-    data = arf[(arf.get("method", "arf_sae") == "arf_sae") & (arf["family"] != "all") & (arf["split"] == "test")]
+    data = arf[
+        (arf.get("method", "arf_sae_single_pass") == "arf_sae_single_pass")
+        & (arf["family"] != "all")
+        & (arf["split"] == "test")
+        & arf["accuracy"].notna()
+    ]
     if data.empty:
-        data = arf[(arf.get("method", "arf_sae") == "arf_sae") & (arf["family"] != "all")]
+        data = arf[
+            (arf.get("method", "arf_sae_single_pass") == "arf_sae_single_pass")
+            & (arf["family"] != "all")
+            & arf["accuracy"].notna()
+        ]
+    if data.empty:
+        return
     pivot = data.pivot_table(index="family", columns="split", values="accuracy", aggfunc="mean").reindex(FAMILY_ORDER)
     fig, ax = plt.subplots(figsize=(7.5, 6.8))
     sns.heatmap(pivot, annot=True, fmt=".2f", cmap="viridis", vmin=0, vmax=1, linewidths=0.5, ax=ax)
@@ -82,7 +100,9 @@ def figure_arf_residual_types(pairs: pd.DataFrame, out_dir: Path) -> None:
 
 def figure_arf_generalization(arf: pd.DataFrame, out_dir: Path) -> None:
     setup_style()
-    data = arf[arf["family"] == "all"].copy()
+    data = arf[(arf["family"] == "all") & arf["accuracy"].notna()].copy()
+    if data.empty:
+        return
     fig, ax = plt.subplots(figsize=(8.2, 5.2))
     if "method" not in data.columns:
         data["method"] = "arf_sae"
@@ -98,7 +118,7 @@ def figure_arf_generalization(arf: pd.DataFrame, out_dir: Path) -> None:
 
 def figure_arf_vs_lexical(arf: pd.DataFrame, out_dir: Path) -> None:
     setup_style()
-    data = arf[(arf["family"] == "all") & (arf["split"].isin(["test", "template_holdout"]))].copy()
+    data = arf[(arf["family"] == "all") & (arf["split"].isin(["test", "template_holdout"])) & arf["accuracy"].notna()].copy()
     if data.empty:
         return
     if "method" not in data.columns:

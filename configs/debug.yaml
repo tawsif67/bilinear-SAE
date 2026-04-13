@@ -52,6 +52,21 @@ external_datasets:
       splits: [train, test]
       kind: prompt_injection_binary
       max_records: 662
+external_sleeper:
+  enabled: true
+  required: false
+  source_name: anthropic_sleeper_agents_external
+  local_path: null
+  hf_dataset_id: null
+  hf_config: null
+  split: train
+  max_records: 200
+strong_judge:
+  enabled: false
+  provider: export_only
+  openai_model: null
+  anthropic_model: null
+  annotation_file: null
 lora:
   r: 16
   alpha: 32

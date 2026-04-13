@@ -50,6 +50,17 @@ class FingerprintClassifier:
         dists = ((x[:, None, :] - self.centroids[None, :, :]) ** 2).sum(-1)
         return np.argmin(dists, axis=1)
 
+    def predict_proba(self, x: np.ndarray) -> np.ndarray:
+        if self.clf is not None and hasattr(self.clf, "predict_proba"):
+            return self.clf.predict_proba(x)
+        if self.centroids is None:
+            raise RuntimeError("ARF classifier must be fit before prediction.")
+        dists = ((x[:, None, :] - self.centroids[None, :, :]) ** 2).sum(-1)
+        logits = -dists
+        logits = logits - logits.max(axis=1, keepdims=True)
+        probs = np.exp(logits)
+        return probs / np.clip(probs.sum(axis=1, keepdims=True), 1e-12, None)
+
 
 def _prompt_example(prompt: str, idx: int) -> ConversationExample:
     return ConversationExample(
@@ -105,6 +116,53 @@ def extract_attack_residuals(
     return torch.stack(residuals, 0), labels, rows
 
 
+def extract_global_control_baseline(
+    subject,
+    pairs: Sequence[AttackFingerprintPair],
+    cfg: Dict[str, Any],
+    intercept_layer: int,
+    logger=None,
+) -> torch.Tensor:
+    controls: List[ConversationExample] = []
+    for pair in pairs:
+        for control in pair.control_prompts:
+            controls.append(_prompt_example(control, len(controls)))
+    if not controls:
+        raise RuntimeError("Cannot build ARF deployable baseline without training controls.")
+    h_seq, _ = extract_hidden_trajectories(subject, controls, cfg, intercept_layer, logger)
+    return h_seq[:, -1, :].float().mean(0)
+
+
+def extract_deployable_attack_features(
+    subject,
+    pairs: Sequence[AttackFingerprintPair],
+    cfg: Dict[str, Any],
+    intercept_layer: int,
+    sae,
+    global_control_baseline: torch.Tensor,
+    logger=None,
+) -> Tuple[np.ndarray, List[str], List[Dict[str, Any]]]:
+    if not pairs:
+        return np.empty((0, 0), dtype=np.float32), [], []
+    examples = [_prompt_example(pair.attack_prompt, idx) for idx, pair in enumerate(pairs)]
+    h_seq, _ = extract_hidden_trajectories(subject, examples, cfg, intercept_layer, logger)
+    baseline = global_control_baseline.to(h_seq.device).float()
+    single_pass_residuals = h_seq[:, -1, :].float() - baseline
+    x = sparse_features_for_residuals(sae, single_pass_residuals)
+    rows = []
+    for pair, resid in zip(pairs, single_pass_residuals):
+        rows.append({
+            "pair_id": pair.id,
+            "family": pair.family,
+            "split": pair.split,
+            "residual_norm": float(resid.norm().cpu()),
+            "n_controls": 0,
+            "deployment_mode": "single_pass_global_benign_baseline",
+            **pair.metadata,
+        })
+    return x, [pair.family for pair in pairs], rows
+
+
 @torch.inference_mode()
 def sparse_features_for_residuals(sae, residuals: torch.Tensor) -> np.ndarray:
     if residuals.numel() == 0:
@@ -144,6 +202,31 @@ def fingerprint_metric_rows(
             "family": family,
             "accuracy": float((pred[mask] == y[mask]).mean()),
             "macro_f1": macro_f1,
+            "n": int(mask.sum()),
+        })
+    return rows
+
+
+def fingerprint_metric_rows_with_scores(
+    classifier: FingerprintClassifier,
+    x: np.ndarray,
+    labels: Sequence[str],
+    split: str,
+    seed: int,
+) -> List[Dict[str, Any]]:
+    rows = fingerprint_metric_rows(classifier, x, labels, split, seed)
+    if len(labels) == 0:
+        return rows
+    probs = classifier.predict_proba(x)
+    for family_idx, family in enumerate(classifier.families):
+        mask = np.array([label == family for label in labels], dtype=bool)
+        if not np.any(mask) or family_idx >= probs.shape[1]:
+            continue
+        rows.append({
+            "seed": seed,
+            "split": split,
+            "family": family,
+            "mean_family_probability": float(probs[mask, family_idx].mean()),
             "n": int(mask.sum()),
         })
     return rows
@@ -208,7 +291,7 @@ def arf_diagnostic_rows(rows: Sequence[Dict[str, Any]], warn_margin: float = 0.0
         by_key.setdefault(key, {})[method] = float(row.get("accuracy", 0.0))
     out = []
     for (seed, split), vals in sorted(by_key.items()):
-        arf = vals.get("arf_sae")
+        arf = vals.get("arf_sae_single_pass", vals.get("arf_sae"))
         lex = vals.get("lexical_baseline")
         if arf is None or lex is None:
             continue
@@ -220,7 +303,7 @@ def arf_diagnostic_rows(rows: Sequence[Dict[str, Any]], warn_margin: float = 0.0
             "lexical_accuracy": lex,
             "accuracy_margin": margin,
             "warning": bool(margin <= warn_margin),
-            "warning_reason": "lexical baseline is within warning margin of ARF-SAE" if margin <= warn_margin else "",
+            "warning_reason": "lexical baseline is within warning margin of single-pass ARF-SAE" if margin <= warn_margin else "",
         })
     return out
 
@@ -236,8 +319,9 @@ def arf_significance_rows(rows: Sequence[Dict[str, Any]]) -> List[Dict[str, Any]
             seed = int(row.get("seed", 0))
             by_seed.setdefault(seed, {})[str(row.get("method", "arf_sae"))] = float(row.get("accuracy", 0.0))
         for vals in by_seed.values():
-            if "arf_sae" in vals and "lexical_baseline" in vals:
-                arf_vals.append(vals["arf_sae"])
+            arf_key = "arf_sae_single_pass" if "arf_sae_single_pass" in vals else "arf_sae"
+            if arf_key in vals and "lexical_baseline" in vals:
+                arf_vals.append(vals[arf_key])
                 lex_vals.append(vals["lexical_baseline"])
     if len(arf_vals) < 2 or wilcoxon is None:
         stat = float("nan")
@@ -247,7 +331,7 @@ def arf_significance_rows(rows: Sequence[Dict[str, Any]]) -> List[Dict[str, Any]
         stat = float(stat)
         p = float(p)
     return [{
-        "comparison": "arf_sae vs lexical_baseline",
+        "comparison": "arf_sae_single_pass vs lexical_baseline",
         "metric": "accuracy",
         "method_mean": float(np.mean(arf_vals)) if arf_vals else 0.0,
         "baseline_mean": float(np.mean(lex_vals)) if lex_vals else 0.0,

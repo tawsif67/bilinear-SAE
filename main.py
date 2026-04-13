@@ -17,6 +17,7 @@ except ImportError:
     LogisticRegression = None
 
 from data.attack_fingerprints import build_attack_fingerprint_pairs
+from data.external_sleeper import load_external_sleeper_benchmark
 from data.external_sources import load_external_source_pools
 from data.loaders import ConversationExample, normalize_text, subsample_examples
 from data.multiturn_jailbreak import load_multiturn_jailbreak
@@ -33,10 +34,22 @@ from eval.mechanistic_taxonomy import mechanistic_taxonomy_rows
 from eval.metrics import compute_metrics
 from eval.null_controls import null_control_rows
 from eval.significance import significance_rows
+from eval.strong_judge import export_strong_judge_requests
 from eval.transfer import transfer_rows
 from models.baselines import ActivationProbe, DenseLinearProbe, mean_difference_vector, top_mean_difference_dims
 from models.baselines import TorchMLPProbe
-from models.arf import arf_diagnostic_rows, arf_significance_rows, extract_attack_residuals, fingerprint_metric_rows, lexical_baseline_rows, sparse_features_for_residuals
+from models.arf import (
+    arf_diagnostic_rows,
+    arf_significance_rows,
+    extract_attack_residuals,
+    extract_deployable_attack_features,
+    extract_global_control_baseline,
+    FingerprintClassifier,
+    fingerprint_metric_rows,
+    fingerprint_metric_rows_with_scores,
+    lexical_baseline_rows,
+    sparse_features_for_residuals,
+)
 from models.ctcr import build_ctcr_residual_dataset, ctcr_analysis_rows, ctcr_scores_for_examples
 from models.subject import SubjectModel, require_full_experiment_device
 from train.train_ctcr import train_ctcr_sae
@@ -52,7 +65,7 @@ from utils.logging_utils import setup_logging
 from utils.seed import set_seed
 
 
-METHODS = [
+DEPLOYMENT_METHODS = [
     "dense_probe",
     "mlp_probe",
     "turn_concat_mlp",
@@ -64,8 +77,22 @@ METHODS = [
     "linear_sae_trajectory",
     "bilinear_sae_only",
     "bilinear_sae_trajectory",
-    "ctcr_residual_bilinear",
     "full_fused",
+]
+
+ANALYSIS_ONLY_METHODS = ["ctcr_residual_bilinear"]
+
+METHOD_MANIFEST = [
+    {"method": method, "category": "deployable_detector", "test_time_forward_passes": 1, "uses_matched_controls_at_test": False}
+    for method in DEPLOYMENT_METHODS
+] + [
+    {
+        "method": "ctcr_residual_bilinear",
+        "category": "mechanistic_diagnostic_only",
+        "test_time_forward_passes": 4,
+        "uses_matched_controls_at_test": True,
+        "note": "CTCR requires pre-specified A/B/0 matched controls and is not treated as a deployment detector.",
+    }
 ]
 
 
@@ -365,8 +392,25 @@ def build_all_datasets(cfg: Dict[str, Any], run_dir: Path, seed: int, logger):
     summary = [
         {"group": "ordinary_harmful_benign", "source": "allenai/wildjailbreak", "n": len(wild), "note": "Gated WildJailbreak; train/eval configs adapted by data_type."},
         {"group": "ordinary_multiturn_jailbreak", "source": cfg.get("multiturn_dataset", "ScaleAI/mhj"), "n": len(multi), "note": note},
-        {"group": "sleeper_distributed_trigger", "source": "constructed_sleeper", "n": len(sleeper), "note": "Programmatic sleeper-style distributed triggers; separated from public data."},
+        {
+            "group": "sleeper_distributed_trigger",
+            "source": "constructed_sleeper",
+            "n": len(sleeper),
+            "note": "Programmatic sleeper-style distributed triggers; analysis/development data only, not sufficient for the main external-validity claim.",
+        },
     ]
+    external_sleeper, external_sleeper_summary, external_sleeper_errors = load_external_sleeper_benchmark(cfg)
+    if external_sleeper:
+        external_sleeper = _split_and_save(run_dir, "external_sleeper_validation", external_sleeper, (0.0, 0.20, 0.80), seed, "family")
+    write_jsonl(run_dir / "synthetic_datasets" / "external_sleeper_validation.jsonl", [ex.to_dict() for ex in external_sleeper])
+    write_json(run_dir / "synthetic_datasets" / "external_sleeper_validation_summary.json", external_sleeper_summary)
+    write_jsonl(run_dir / "synthetic_datasets" / "external_sleeper_validation_errors.jsonl", external_sleeper_errors)
+    summary.append({
+        "group": "external_sleeper_validation",
+        "source": external_sleeper_summary.get("source", "not_configured"),
+        "n": len(external_sleeper),
+        "note": external_sleeper_summary.get("note", "external sleeper validation status unknown"),
+    })
     real_attack_corpus = []
     external_attack_pool: List[Dict[str, Any]] = []
     external_benign_pool: List[Dict[str, Any]] = []
@@ -399,6 +443,7 @@ def build_all_datasets(cfg: Dict[str, Any], run_dir: Path, seed: int, logger):
         "wild": wild,
         "multi": multi,
         "sleeper": sleeper,
+        "external_sleeper": external_sleeper,
         "real_attack_corpus": real_attack_corpus,
         "external_attack_pool": external_attack_pool,
         "external_benign_pool": external_benign_pool,
@@ -444,7 +489,7 @@ def _balanced_subsample(groups: List[List[ConversationExample]], budget: int) ->
 
 
 def _select_eval_examples(datasets: Dict[str, List[ConversationExample]], cfg: Dict[str, Any]) -> Dict[str, List[ConversationExample]]:
-    benchmark_groups = [group for group in datasets.values() if group and isinstance(group[0], ConversationExample)]
+    benchmark_groups = [datasets.get("wild", []), datasets.get("multi", []), datasets.get("sleeper", [])]
     train_groups = [[ex for ex in group if ex.split == "train"] for group in benchmark_groups]
     val_groups = [[ex for ex in group if ex.split == "val"] for group in benchmark_groups]
     train = _balanced_subsample(train_groups, int(cfg["train_subsample"]))
@@ -454,6 +499,7 @@ def _select_eval_examples(datasets: Dict[str, List[ConversationExample]], cfg: D
         "ordinary_multiturn_jailbreak": [ex for ex in datasets["multi"] if ex.split == "test"],
         "sleeper_distributed_trigger": [ex for ex in datasets["sleeper"] if ex.split == "test" and not ex.is_ood],
         "sleeper_ood": [ex for ex in datasets["sleeper"] if ex.is_ood],
+        "external_sleeper_validation": [ex for ex in datasets.get("external_sleeper", []) if ex.split in {"val", "test"}],
     }
     external_attack_rows = [row for row in datasets.get("external_attack_pool", []) if isinstance(row, dict)]
     external_sources = sorted({str(row.get("base_dataset_key", "")) for row in external_attack_rows if row.get("base_dataset_key")})
@@ -648,22 +694,43 @@ def _run_attack_fingerprints(
     train_resid, train_labels, train_raw = extract_attack_residuals(subject, train_pairs, cfg, intercept_layer, logger)
     train_resid = train_resid.to(subject.device).float()
     arf_sae, arf_clf, arf_stats = train_arf_sae_classifier(train_resid, train_labels, cfg, subject.hidden_size, run_dir / "checkpoints", seed, logger)
+    global_control_baseline = extract_global_control_baseline(subject, train_pairs, cfg, intercept_layer, logger).to(subject.device).float()
+    x_train_single, train_single_labels, train_single_raw = extract_deployable_attack_features(
+        subject, train_pairs, cfg, intercept_layer, arf_sae, global_control_baseline, logger
+    )
+    label_to_id = {name: i for i, name in enumerate(arf_clf.families)}
+    y_train_single = np.array([label_to_id[label] for label in train_single_labels if label in label_to_id], dtype=int)
+    if len(y_train_single) != len(train_single_labels):
+        raise RuntimeError("ARF deployable classifier saw a training label outside fitted family set.")
+    deploy_clf = FingerprintClassifier(families=arf_clf.families)
+    deploy_clf.fit(x_train_single, y_train_single)
     rows: List[Dict[str, Any]] = []
     lexical_rows: List[Dict[str, Any]] = []
-    raw_rows: List[Dict[str, Any]] = [{**row, "seed": seed} for row in train_raw]
+    raw_rows: List[Dict[str, Any]] = [{**row, "seed": seed, "method": "arf_sae_matched_residual"} for row in train_raw]
+    raw_rows.extend({**row, "seed": seed, "method": "arf_sae_single_pass"} for row in train_single_raw)
     for split, split_pairs in [("train", train_pairs), ("val", val_pairs), ("test", test_pairs), ("template_holdout", template_holdout_pairs)]:
         if not split_pairs:
             continue
         if split == "train":
             resid, labels = train_resid, train_labels
+            x_single, single_labels = x_train_single, train_single_labels
         else:
             resid, labels, raw = extract_attack_residuals(subject, split_pairs, cfg, intercept_layer, logger)
             resid = resid.to(subject.device).float()
-            raw_rows.extend({**row, "seed": seed} for row in raw)
+            raw_rows.extend({**row, "seed": seed, "method": "arf_sae_matched_residual"} for row in raw)
+            x_single, single_labels, raw_single = extract_deployable_attack_features(
+                subject, split_pairs, cfg, intercept_layer, arf_sae, global_control_baseline, logger
+            )
+            raw_rows.extend({**row, "seed": seed, "method": "arf_sae_single_pass"} for row in raw_single)
         x = sparse_features_for_residuals(arf_sae, resid)
         for row in fingerprint_metric_rows(arf_clf, x, labels, split, seed):
             row.update(arf_stats)
-            row["method"] = "arf_sae"
+            row["method"] = "arf_sae_matched_residual_analysis"
+            rows.append(row)
+        for row in fingerprint_metric_rows_with_scores(deploy_clf, x_single, single_labels, split, seed):
+            row.update(arf_stats)
+            row["method"] = "arf_sae_single_pass"
+            row["uses_matched_controls_at_test"] = False
             rows.append(row)
         lexical_rows.extend(lexical_baseline_rows(train_pairs, split_pairs, split, seed, int(cfg.get("attack_fingerprints", {}).get("lexical_max_features", 2048))))
         if split != "train":
@@ -768,6 +835,8 @@ def run_seed(seed: int, cfg: Dict[str, Any], run_dir: Path, datasets: Dict[str, 
     for group, examples in selected.items():
         if group in {"train", "val"} or not examples:
             continue
+        if not isinstance(examples, list) or not isinstance(examples[0], ConversationExample):
+            continue
         eval_h, _ = extract_hidden_trajectories(subject, examples, cfg, intercept_layer, logger)
         eval_h = eval_h.to(device).float()
         eval_y = _targets(examples).to(device)
@@ -801,7 +870,7 @@ def run_seed(seed: int, cfg: Dict[str, Any], run_dir: Path, datasets: Dict[str, 
                     "prompt": ex.prompt_text,
                     "base_response": response,
                 })
-        for method in METHODS:
+        for method in DEPLOYMENT_METHODS:
             for threshold in cfg["eval"]["thresholds"]:
                 intervened = _intervention_flags(scores[method], float(threshold))
                 preds = [0 if flag else int(base_pred) for base_pred, flag in zip(base_preds, intervened)]
@@ -844,6 +913,7 @@ def run_seed(seed: int, cfg: Dict[str, Any], run_dir: Path, datasets: Dict[str, 
         clear_cuda_cache(device)
 
     write_jsonl(run_dir / "human_eval_samples" / f"samples_seed_{seed}.jsonl", human_rows)
+    export_strong_judge_requests(human_rows, run_dir / "human_eval_samples" / f"strong_judge_requests_seed_{seed}.jsonl")
     del subject
     gc.collect()
     if torch.cuda.is_available():
@@ -930,6 +1000,24 @@ def main() -> None:
     sig_df = pd.DataFrame(significance_rows(all_metrics))
     dataset_df = pd.DataFrame(dataset_summary)
     config_df = pd.DataFrame([{"key": k, "value": str(v)} for k, v in cfg.items()])
+    method_manifest_df = pd.DataFrame(METHOD_MANIFEST)
+    validity_warnings = []
+    has_external_sleeper = False
+    if not dataset_df.empty and {"group", "n"}.issubset(dataset_df.columns):
+        n_values = pd.to_numeric(dataset_df["n"], errors="coerce").fillna(0).astype(int)
+        has_external_sleeper = bool(((dataset_df["group"] == "external_sleeper_validation") & (n_values > 0)).any())
+    if not has_external_sleeper:
+        validity_warnings.append({
+            "severity": "blocking_for_iclr_claim",
+            "issue": "No external sleeper-agent validation set was loaded.",
+            "required_fix": "Configure external_sleeper.local_path or external_sleeper.hf_dataset_id and rerun before claiming sleeper-agent generalization.",
+        })
+    if str(cfg.get("judge_model", "")) == "google/gemma-3-4b-it" and not bool(cfg.get("strong_judge", {}).get("enabled", False)):
+        validity_warnings.append({
+            "severity": "paper_risk",
+            "issue": "Main ASR labels use Gemma 3 4B only.",
+            "required_fix": "For paper-grade main results, adjudicate a held-out sample or full set with GPT-4/Claude/human labels and report agreement.",
+        })
     metrics_df.to_json(run_dir / "raw_metrics" / "metrics.json", orient="records", indent=2)
     metrics_df.to_csv(run_dir / "raw_metrics" / "metrics.csv", index=False)
     feature_df.to_csv(run_dir / "raw_metrics" / "feature_metrics.csv", index=False)
@@ -945,10 +1033,13 @@ def main() -> None:
     arf_raw_df.to_csv(run_dir / "raw_metrics" / "attack_residual_pairs.csv", index=False)
     arf_diag_df.to_csv(run_dir / "raw_metrics" / "attack_residual_diagnostics.csv", index=False)
     arf_sig_df.to_csv(run_dir / "raw_metrics" / "attack_residual_significance.csv", index=False)
+    method_manifest_df.to_csv(run_dir / "raw_metrics" / "method_manifest.csv", index=False)
+    write_json(run_dir / "raw_metrics" / "validity_warnings.json", validity_warnings)
     export_tables(metrics_df, sig_df, dataset_df, config_df, run_dir / "tables")
     arf_df.to_csv(run_dir / "tables" / "attack_residual_fingerprints.csv", index=False)
     arf_diag_df.to_csv(run_dir / "tables" / "attack_residual_diagnostics.csv", index=False)
     arf_sig_df.to_csv(run_dir / "tables" / "attack_residual_significance.csv", index=False)
+    method_manifest_df.to_csv(run_dir / "tables" / "method_manifest.csv", index=False)
     make_main_figures(metrics_df, feature_df, run_dir / "figures")
     make_appendix_figures(metrics_df, feature_df, locality_df, run_dir / "figures")
     make_mechanistic_claim_figures(taxonomy_df, conjunction_df, causal_df, run_dir / "figures")
