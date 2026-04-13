@@ -303,13 +303,14 @@ def run_seed(seed: int, cfg: Dict[str, Any], run_dir: Path, datasets: Dict[str, 
         layer_rows.extend(layer_summary_rows(eval_h, eval_y, seed, intercept_layer, group))
         base_responses, tok_sec = generate_responses(subject, examples, cfg)
         processor, judge_model = judge
-        base_preds = judge_predictions(processor, judge_model, [ex.prompt_text for ex in examples], base_responses, int(cfg["max_seq_len"]))
+        judge_batch_size = int(cfg["eval"].get("judge_batch_size", min(4, int(cfg["eval"]["batch_size"]))))
+        base_preds = judge_predictions(processor, judge_model, [ex.prompt_text for ex in examples], base_responses, int(cfg["max_seq_len"]), judge_batch_size)
         base_rows = [{"target": ex.target, "judge_pred": pred, "score": pred, "family_holdout": ex.family_holdout, "is_ood": ex.is_ood} for ex, pred in zip(examples, base_preds)]
         base_asr = compute_metrics(base_rows).get("asr", 0.0)
         for method in METHODS:
             for threshold in cfg["eval"]["thresholds"]:
                 responses, intervened = _guarded_responses(base_responses, scores[method], float(threshold))
-                preds = judge_predictions(processor, judge_model, [ex.prompt_text for ex in examples], responses, int(cfg["max_seq_len"]))
+                preds = [0 if flag else int(base_pred) for base_pred, flag in zip(base_preds, intervened)]
                 rows = []
                 for ex, pred, score, flag, response in zip(examples, preds, scores[method], intervened, responses):
                     row = {

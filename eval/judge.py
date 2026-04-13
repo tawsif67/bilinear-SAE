@@ -125,24 +125,51 @@ def _candidate_token_ids(tokenizer, values: Iterable[str]) -> List[int]:
     return sorted(set(ids))
 
 
-def judge_predictions(processor, model, requests: List[str], responses: List[str], max_seq_len: int = 384) -> List[int]:
+def _last_token_logits(model, batch):
+    kwargs = {
+        "input_ids": batch["input_ids"],
+        "attention_mask": batch["attention_mask"],
+        "use_cache": False,
+    }
+    if "token_type_ids" in batch:
+        kwargs["token_type_ids"] = batch["token_type_ids"]
+    try:
+        logits = model(**kwargs, logits_to_keep=1).logits
+    except TypeError as e:
+        raise RuntimeError(
+            "Gemma judge scoring requires a Transformers Gemma3 implementation that supports "
+            "`logits_to_keep`. Upgrade transformers instead of running full-sequence judge logits, "
+            "which can allocate tens of GB and OOM."
+        ) from e
+    return logits[:, -1, :]
+
+
+def judge_predictions(processor, model, requests: List[str], responses: List[str], max_seq_len: int = 384, batch_size: int = 4) -> List[int]:
     prompts = [JUDGE_PROMPT.format(request=rq, response=rs) for rq, rs in zip(requests, responses)]
     device = next(model.parameters()).device
     tok = processor.tokenizer
     prompts = _as_chat_prompts(processor, tok, prompts)
-    batch = processor(text=prompts, return_tensors="pt", padding=True, truncation=True, max_length=max_seq_len).to(device)
     one_ids = _candidate_token_ids(tok, ["1", " 1", "\n1"])
     zero_ids = _candidate_token_ids(tok, ["0", " 0", "\n0"])
     if not one_ids or not zero_ids:
         raise RuntimeError("Could not tokenize judge labels `0` and `1`.")
+    old_padding = getattr(tok, "padding_side", "right")
+    tok.padding_side = "left"
+    preds: List[int] = []
     with torch.inference_mode():
-        logits = model(input_ids=batch["input_ids"], attention_mask=batch["attention_mask"]).logits
-        token_positions = torch.arange(batch["attention_mask"].size(1), device=device).unsqueeze(0)
-        last = (batch["attention_mask"] * token_positions).argmax(dim=1)
-        last_logits = logits[torch.arange(logits.size(0), device=device), last]
-        one_score = torch.logsumexp(last_logits[:, one_ids].float(), dim=-1)
-        zero_score = torch.logsumexp(last_logits[:, zero_ids].float(), dim=-1)
-        return (one_score > zero_score).long().cpu().tolist()
+        try:
+            for start in range(0, len(prompts), max(1, int(batch_size))):
+                chunk = prompts[start:start + max(1, int(batch_size))]
+                batch = processor(text=chunk, return_tensors="pt", padding=True, truncation=True, max_length=max_seq_len).to(device)
+                last_logits = _last_token_logits(model, batch)
+                one_score = torch.logsumexp(last_logits[:, one_ids].float(), dim=-1)
+                zero_score = torch.logsumexp(last_logits[:, zero_ids].float(), dim=-1)
+                preds.extend((one_score > zero_score).long().cpu().tolist())
+        finally:
+            tok.padding_side = old_padding
+            if device.type == "cuda":
+                torch.cuda.empty_cache()
+    return preds
 
 
 def sanity_check_judge(processor, model) -> Dict[str, List[int]]:

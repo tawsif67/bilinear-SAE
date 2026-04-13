@@ -41,6 +41,7 @@ baselines:
   mlp_lr: 1e-3
 eval:
   batch_size: 8
+  judge_batch_size: 4
   max_new_tokens: 32
   thresholds: [inf, 0.90, 0.75, 0.60, 0.45, 0.30, 0.20, 0.10, 0.05]
   seeds: [42]
