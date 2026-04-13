@@ -46,6 +46,13 @@ def write_jsonl(path: Path, rows: Iterable[Dict[str, Any]]) -> None:
             f.write(json.dumps(json_safe(row), ensure_ascii=False, allow_nan=False) + "\n")
 
 
+def append_jsonl(path: Path, rows: Iterable[Dict[str, Any]]) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with path.open("a", encoding="utf-8") as f:
+        for row in rows:
+            f.write(json.dumps(json_safe(row), ensure_ascii=False, allow_nan=False) + "\n")
+
+
 def write_csv(path: Path, rows: List[Dict[str, Any]]) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     if not rows:

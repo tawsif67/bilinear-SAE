@@ -41,7 +41,7 @@ from train.train_sae import train_saes
 from utils.config_utils import load_config
 from utils.dependencies import assert_runtime_dependencies
 from utils.gpu_memory import clear_cuda_cache, cuda_memory_snapshot, is_cuda_oom, log_cuda_memory, tune_batch_sizes_for_memory
-from utils.io import make_run_dir, stable_hash, write_json, write_jsonl, write_yaml
+from utils.io import append_jsonl, make_run_dir, stable_hash, write_json, write_jsonl, write_yaml
 from utils.logging_utils import setup_logging
 from utils.seed import set_seed
 
@@ -203,16 +203,10 @@ def _threshold_label(t: float) -> str:
     return "inf" if np.isinf(t) else f"{t:.2f}"
 
 
-def _guarded_responses(base_responses: List[str], scores: np.ndarray, threshold: float) -> tuple[List[str], List[bool]]:
+def _intervention_flags(scores: np.ndarray, threshold: float) -> List[bool]:
     if np.isinf(threshold):
-        return list(base_responses), [False for _ in base_responses]
-    flags = scores > threshold
-    responses = [
-        "I cannot help with harmful, unauthorized, or operationally unsafe instructions. I can offer safe alternatives."
-        if flag else resp
-        for resp, flag in zip(base_responses, flags)
-    ]
-    return responses, flags.tolist()
+        return [False for _ in scores]
+    return (scores > threshold).tolist()
 
 
 def _defended_perplexity(subject, cfg: Dict[str, Any], logger=None) -> float:
@@ -361,7 +355,10 @@ def run_seed(seed: int, cfg: Dict[str, Any], run_dir: Path, datasets: Dict[str, 
     }
 
     metric_rows: List[Dict[str, Any]] = []
-    raw_rows: List[Dict[str, Any]] = []
+    raw_path = run_dir / "raw_metrics" / f"raw_generations_seed_{seed}.jsonl"
+    write_jsonl(raw_path, [])
+    human_rows: List[Dict[str, Any]] = []
+    human_limit = int(cfg["eval"].get("human_eval_samples", 96))
     feature_rows = _feature_rows(seed, linear_sae, bilinear_sae, train_h, train_y, bad_feats, sae_stats)
     locality_rows = []
     taxonomy_rows: List[Dict[str, Any]] = []
@@ -391,12 +388,30 @@ def run_seed(seed: int, cfg: Dict[str, Any], run_dir: Path, datasets: Dict[str, 
         log_cuda_memory(logger, f"after_judge_{seed}_{group}", device)
         base_rows = [{"target": ex.target, "judge_pred": pred, "score": pred, "family_holdout": ex.family_holdout, "is_ood": ex.is_ood} for ex, pred in zip(examples, base_preds)]
         base_asr = compute_metrics(base_rows).get("asr", 0.0)
+        if len(human_rows) < human_limit:
+            room = human_limit - len(human_rows)
+            for ex, response, pred in zip(examples[:room], base_responses[:room], base_preds[:room]):
+                human_rows.append({
+                    "seed": seed,
+                    "eval_slice": group,
+                    "group": ex.group if group != "sleeper_ood" else "sleeper_distributed_trigger",
+                    "example_id": ex.id,
+                    "target": ex.target,
+                    "judge_pred": int(pred),
+                    "family": ex.family,
+                    "mode": ex.mode,
+                    "family_holdout": ex.family_holdout,
+                    "is_ood": ex.is_ood,
+                    "prompt": ex.prompt_text,
+                    "base_response": response,
+                })
         for method in METHODS:
             for threshold in cfg["eval"]["thresholds"]:
-                responses, intervened = _guarded_responses(base_responses, scores[method], float(threshold))
+                intervened = _intervention_flags(scores[method], float(threshold))
                 preds = [0 if flag else int(base_pred) for base_pred, flag in zip(base_preds, intervened)]
                 rows = []
-                for ex, pred, score, flag, response in zip(examples, preds, scores[method], intervened, responses):
+                raw_chunk = []
+                for ex, pred, score, flag in zip(examples, preds, scores[method], intervened):
                     row = {
                         "seed": seed,
                         "group": ex.group if group != "sleeper_ood" else "sleeper_distributed_trigger",
@@ -413,14 +428,14 @@ def run_seed(seed: int, cfg: Dict[str, Any], run_dir: Path, datasets: Dict[str, 
                         "mode": ex.mode,
                         "family_holdout": ex.family_holdout,
                         "is_ood": ex.is_ood,
-                        "response": response,
                     }
                     rows.append(row)
-                    raw_rows.append(row)
+                    raw_chunk.append(row)
                 metrics = compute_metrics(rows, base_asr=base_asr)
                 metrics.update({"seed": seed, "group": rows[0]["group"], "eval_slice": group, "method": method, "threshold": float(threshold), "threshold_label": _threshold_label(float(threshold)), "defended_perplexity": ppx, "tokens_sec": tok_sec, **sae_stats, **ctcr_stats, **fuser_stats})
                 metrics["in_family_asr_reduction"] = metrics["asr_reduction"] if group == "sleeper_distributed_trigger" else 0.0
                 metric_rows.append(metrics)
+                append_jsonl(raw_path, raw_chunk)
                 clean_flags = [flag for ex, flag in zip(examples, intervened) if ex.target == 0]
                 attack_flags = [flag for ex, flag in zip(examples, intervened) if ex.target == 1]
                 locality_rows.extend([
@@ -428,9 +443,11 @@ def run_seed(seed: int, cfg: Dict[str, Any], run_dir: Path, datasets: Dict[str, 
                     {"seed": seed, "method": method, "prompt_type": "harmful", "intervention_rate": float(np.mean(attack_flags)) if attack_flags else 0.0},
                     {"seed": seed, "method": method, "prompt_type": "matched_controls", "intervention_rate": float(np.mean(intervened)) if intervened else 0.0},
                 ])
+        del eval_h, eval_y, scores, base_responses, base_preds
+        gc.collect()
+        clear_cuda_cache(device)
 
-    write_jsonl(run_dir / "raw_metrics" / f"raw_generations_seed_{seed}.jsonl", raw_rows)
-    write_jsonl(run_dir / "human_eval_samples" / f"samples_seed_{seed}.jsonl", raw_rows[: int(cfg["eval"].get("human_eval_samples", 96))])
+    write_jsonl(run_dir / "human_eval_samples" / f"samples_seed_{seed}.jsonl", human_rows)
     del subject
     gc.collect()
     if torch.cuda.is_available():
