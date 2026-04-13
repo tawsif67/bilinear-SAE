@@ -171,6 +171,7 @@ and then trains a lightweight classifier over the sparse residual activations. T
     main_figures.py
     appendix_figures.py
     latex_tables.py
+    arf_figures.py
   utils/
     seed.py
     io.py
@@ -372,6 +373,11 @@ Important files:
 - `figures/fig3_mechanistic.pdf`
 - `figures/fig4_generalization.pdf`
 - `figures/fig5_mechanistic_claim.pdf`
+- `figures/fig6_arf_family_accuracy.pdf`
+- `figures/fig7_arf_family_heatmap.pdf`
+- `figures/fig8_arf_residual_norms.pdf`
+- `figures/fig9_arf_residual_types.pdf`
+- `figures/fig10_arf_generalization.pdf`
 
 Figures are saved as both PDF and PNG where applicable.
 

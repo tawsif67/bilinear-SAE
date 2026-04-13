@@ -20,7 +20,7 @@ mods = [
  'models.subject','models.sae','models.trajectory','models.fusion','models.baselines','models.interventions','models.ctcr','models.arf',
  'train.train_lora','train.train_sae','train.train_ctcr','train.train_arf','train.train_fuser',
  'eval.judge','eval.generate','eval.metrics','eval.ablations','eval.significance','eval.mechanistic_taxonomy','eval.conjunction_tests','eval.causal_interventions','eval.null_controls','eval.transfer','eval.layer_sweep',
- 'plots.style','plots.main_figures','plots.appendix_figures','plots.latex_tables','plots.mechanistic_figures',
+ 'plots.style','plots.main_figures','plots.appendix_figures','plots.latex_tables','plots.mechanistic_figures','plots.arf_figures',
  'main'
 ]
 for m in mods:

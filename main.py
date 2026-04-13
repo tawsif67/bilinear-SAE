@@ -522,6 +522,7 @@ def main() -> None:
     cfg = load_config(args.config)
     assert_runtime_dependencies()
     from plots.appendix_figures import make_appendix_figures
+    from plots.arf_figures import make_arf_figures
     from plots.latex_tables import export_tables
     from plots.main_figures import make_main_figures
     from plots.mechanistic_figures import make_mechanistic_claim_figures
@@ -606,6 +607,8 @@ def main() -> None:
     make_main_figures(metrics_df, feature_df, run_dir / "figures")
     make_appendix_figures(metrics_df, feature_df, locality_df, run_dir / "figures")
     make_mechanistic_claim_figures(taxonomy_df, conjunction_df, causal_df, run_dir / "figures")
+    if bool(cfg.get("attack_fingerprints", {}).get("enabled", True)):
+        make_arf_figures(arf_df, arf_raw_df, run_dir / "figures")
     logger.info("Run complete: %s", run_dir)
 
 
