@@ -86,6 +86,6 @@ def make_run_dir(output_root: str | Path) -> Path:
     root = Path(output_root)
     stamp = time.strftime("%Y%m%d_%H%M%S")
     run_dir = root / f"run_{stamp}"
-    for sub in ["splits", "checkpoints", "raw_metrics", "figures", "tables", "logs", "human_eval_samples"]:
+    for sub in ["splits", "checkpoints", "raw_metrics", "figures", "tables", "logs", "human_eval_samples", "synthetic_datasets"]:
         (run_dir / sub).mkdir(parents=True, exist_ok=True)
     return run_dir

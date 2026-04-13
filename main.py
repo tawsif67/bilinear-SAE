@@ -4,6 +4,7 @@ import argparse
 import gc
 import platform
 from pathlib import Path
+from collections import Counter, defaultdict
 from typing import Any, Dict, List
 
 import numpy as np
@@ -75,6 +76,80 @@ def _last_user_text(ex: ConversationExample) -> str:
     return normalize_text(ex.prompt_text)
 
 
+def _write_synthetic_dataset_artifacts(run_dir: Path, name: str, rows: List[Dict[str, Any]], summary: Dict[str, Any]) -> None:
+    out_dir = run_dir / "synthetic_datasets"
+    write_jsonl(out_dir / f"{name}.jsonl", rows)
+    write_json(out_dir / f"{name}_summary.json", summary)
+
+
+def _sleeper_synthetic_summary(examples: List[ConversationExample]) -> Dict[str, Any]:
+    mode_counts = Counter(ex.mode for ex in examples)
+    family_counts = Counter(ex.family for ex in examples)
+    groups: Dict[str, set] = defaultdict(set)
+    for ex in examples:
+        group = str((ex.metadata or {}).get("residual_group", ""))
+        if group:
+            groups[group].add(ex.mode)
+    required = {
+        "both_conditions",
+        "only_condition_a",
+        "only_condition_b",
+        "neither_condition",
+        "b_then_a",
+        "same_turn_ab",
+        "a_gap_b",
+        "a_interrupt_b",
+        "a_reset_b",
+        "decoy_a_then_b",
+        "a_then_decoy_b",
+        "a_long_gap_b",
+        "shuffled_turns",
+        "single_turn_compressed",
+    }
+    complete_groups = sum(1 for modes in groups.values() if required.issubset(modes))
+    return {
+        "source": "constructed_sleeper",
+        "n_examples": len(examples),
+        "n_residual_groups": len(groups),
+        "n_complete_sequence_control_groups": complete_groups,
+        "mode_counts": dict(mode_counts),
+        "family_counts": dict(family_counts),
+        "required_modes": sorted(required),
+        "robustness_design": [
+            "deterministic seed-controlled generation",
+            "matched request/condition/trigger metadata within residual_group",
+            "group-preserving train/val/test splits",
+            "canonical A-then-B attack plus A-only, B-only, neither controls",
+            "temporal controls: reverse, same-turn, gap, interrupt, reset, long-gap, shuffled, compressed",
+            "semantic controls: decoy-A and decoy-B",
+            "redacted/proxy unsafe-compliance targets; no harmful completions are generated",
+        ],
+    }
+
+
+def _arf_synthetic_summary(pairs) -> Dict[str, Any]:
+    family_counts = Counter(pair.family for pair in pairs)
+    split_counts = Counter(pair.split for pair in pairs)
+    control_counts = Counter(len(pair.control_prompts) for pair in pairs)
+    residual_types = Counter(str(pair.metadata.get("residual_type", "")) for pair in pairs)
+    return {
+        "source": "constructed_attack_residual_fingerprints",
+        "n_pairs": len(pairs),
+        "family_counts": dict(family_counts),
+        "split_counts": dict(split_counts),
+        "control_count_distribution": dict(control_counts),
+        "residual_type_counts": dict(residual_types),
+        "robustness_design": [
+            "matched attack/control prompts per family",
+            "multiple template variants for roleplay, policy override, and refusal suppression",
+            "obfuscation controls separate decode pressure from harmful compliance",
+            "sleeper sequence pairs include reverse, same-turn, decoy, reset, and long-gap controls",
+            "deterministic generation from seed and saved source_index metadata",
+            "compact residuals are computed as attack hidden state minus mean matched control hidden state",
+        ],
+    }
+
+
 def _targets(examples: List[ConversationExample]) -> torch.Tensor:
     return torch.tensor([ex.target for ex in examples], dtype=torch.long)
 
@@ -98,6 +173,12 @@ def build_all_datasets(cfg: Dict[str, Any], run_dir: Path, seed: int, logger):
     benign = [ex.turns[-1]["content"] for ex in wild if ex.source_is_benign][:200]
     harmful = [ex.turns[-1]["content"] for ex in wild if ex.target == 1][:200]
     sleeper = _split_and_save(run_dir, "constructed_sleeper", build_sleeper_dataset(cfg, seed, benign, harmful), (0.60, 0.20, 0.20), seed, "family", group_key="residual_group")
+    _write_synthetic_dataset_artifacts(
+        run_dir,
+        "constructed_sleeper_dataset",
+        [ex.to_dict() for ex in sleeper],
+        _sleeper_synthetic_summary(sleeper),
+    )
     summary = [
         {"group": "ordinary_harmful_benign", "source": "allenai/wildjailbreak", "n": len(wild), "note": "Gated WildJailbreak; train/eval configs adapted by data_type."},
         {"group": "ordinary_multiturn_jailbreak", "source": cfg.get("multiturn_dataset", "ScaleAI/mhj"), "n": len(multi), "note": note},
@@ -308,6 +389,12 @@ def _run_attack_fingerprints(
     pairs = build_attack_fingerprint_pairs(cfg, seed, benign_pool, harmful_pool)
     if not pairs:
         return [], []
+    _write_synthetic_dataset_artifacts(
+        run_dir,
+        f"attack_residual_fingerprints_seed_{seed}",
+        [pair.to_dict() for pair in pairs],
+        _arf_synthetic_summary(pairs),
+    )
     train_pairs = [pair for pair in pairs if pair.split == "train"]
     val_pairs = [pair for pair in pairs if pair.split == "val"]
     test_pairs = [pair for pair in pairs if pair.split == "test"]

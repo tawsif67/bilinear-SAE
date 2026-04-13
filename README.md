@@ -344,6 +344,7 @@ outputs/run_<timestamp>/
   tables/
   logs/
   human_eval_samples/
+  synthetic_datasets/
 ```
 
 Important files:
@@ -357,6 +358,10 @@ Important files:
 - `raw_metrics/ctcr_residuals.csv`
 - `raw_metrics/attack_residual_fingerprints.csv`
 - `raw_metrics/attack_residual_pairs.csv`
+- `synthetic_datasets/constructed_sleeper_dataset.jsonl`
+- `synthetic_datasets/constructed_sleeper_dataset_summary.json`
+- `synthetic_datasets/attack_residual_fingerprints_seed_<seed>.jsonl`
+- `synthetic_datasets/attack_residual_fingerprints_seed_<seed>_summary.json`
 - `raw_metrics/causal_interventions.csv`
 - `raw_metrics/null_controls.csv`
 - `raw_metrics/transfer_results.csv`
@@ -380,6 +385,8 @@ Important files:
 - `figures/fig10_arf_generalization.pdf`
 
 Figures are saved as both PDF and PNG where applicable.
+
+The `synthetic_datasets/` directory is intended for paper/letter artifacts. It stores the exact constructed sleeper examples, ARF attack/control prompts, split labels, matched-control metadata, and robustness summaries used in the run.
 
 ## Main Experiments
 
