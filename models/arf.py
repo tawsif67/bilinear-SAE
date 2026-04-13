@@ -14,6 +14,10 @@ except ImportError:
     LogisticRegression = None
     accuracy_score = None
     f1_score = None
+try:
+    from scipy.stats import wilcoxon
+except ImportError:
+    wilcoxon = None
 
 from data.attack_fingerprints import AttackFingerprintPair
 from data.loaders import ConversationExample
@@ -191,4 +195,63 @@ def lexical_baseline_rows(
         "accuracy": acc,
         "macro_f1": macro_f1,
         "n": int(len(y_valid)),
+    }]
+
+
+def arf_diagnostic_rows(rows: Sequence[Dict[str, Any]], warn_margin: float = 0.05) -> List[Dict[str, Any]]:
+    by_key: Dict[Tuple[int, str], Dict[str, float]] = {}
+    for row in rows:
+        if row.get("family") != "all":
+            continue
+        method = str(row.get("method", "arf_sae"))
+        key = (int(row.get("seed", 0)), str(row.get("split", "")))
+        by_key.setdefault(key, {})[method] = float(row.get("accuracy", 0.0))
+    out = []
+    for (seed, split), vals in sorted(by_key.items()):
+        arf = vals.get("arf_sae")
+        lex = vals.get("lexical_baseline")
+        if arf is None or lex is None:
+            continue
+        margin = arf - lex
+        out.append({
+            "seed": seed,
+            "split": split,
+            "arf_accuracy": arf,
+            "lexical_accuracy": lex,
+            "accuracy_margin": margin,
+            "warning": bool(margin <= warn_margin),
+            "warning_reason": "lexical baseline is within warning margin of ARF-SAE" if margin <= warn_margin else "",
+        })
+    return out
+
+
+def arf_significance_rows(rows: Sequence[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    arf_vals = []
+    lex_vals = []
+    for split in ["test", "template_holdout"]:
+        by_seed: Dict[int, Dict[str, float]] = {}
+        for row in rows:
+            if row.get("family") != "all" or row.get("split") != split:
+                continue
+            seed = int(row.get("seed", 0))
+            by_seed.setdefault(seed, {})[str(row.get("method", "arf_sae"))] = float(row.get("accuracy", 0.0))
+        for vals in by_seed.values():
+            if "arf_sae" in vals and "lexical_baseline" in vals:
+                arf_vals.append(vals["arf_sae"])
+                lex_vals.append(vals["lexical_baseline"])
+    if len(arf_vals) < 2 or wilcoxon is None:
+        stat = float("nan")
+        p = float("nan")
+    else:
+        stat, p = wilcoxon(np.array(arf_vals), np.array(lex_vals), alternative="greater")
+        stat = float(stat)
+        p = float(p)
+    return [{
+        "comparison": "arf_sae vs lexical_baseline",
+        "metric": "accuracy",
+        "method_mean": float(np.mean(arf_vals)) if arf_vals else 0.0,
+        "baseline_mean": float(np.mean(lex_vals)) if lex_vals else 0.0,
+        "n_pairs": int(min(len(arf_vals), len(lex_vals))),
+        "statistic": stat,
+        "p_value": p,
     }]

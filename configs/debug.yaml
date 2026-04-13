@@ -38,6 +38,8 @@ fuser:
 attack_fingerprints:
   enabled: true
   per_family: 12
+  template_holdout: true
+  holdout_template_variant: 2
   expansion_factor: 4
   k_sparse: 32
   steps: 80
@@ -61,5 +63,6 @@ data:
   sleeper_per_family: 60
   sleeper_ood_per_family: 30
   wikitext_batches: 2
+  audit_examples_per_family: 20
 memory:
   auto_tune: true

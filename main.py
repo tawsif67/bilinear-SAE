@@ -34,7 +34,7 @@ from eval.significance import significance_rows
 from eval.transfer import transfer_rows
 from models.baselines import ActivationProbe, DenseLinearProbe, mean_difference_vector, top_mean_difference_dims
 from models.baselines import TorchMLPProbe
-from models.arf import extract_attack_residuals, fingerprint_metric_rows, lexical_baseline_rows, sparse_features_for_residuals
+from models.arf import arf_diagnostic_rows, arf_significance_rows, extract_attack_residuals, fingerprint_metric_rows, lexical_baseline_rows, sparse_features_for_residuals
 from models.ctcr import build_ctcr_residual_dataset, ctcr_analysis_rows, ctcr_scores_for_examples
 from models.subject import SubjectModel, require_full_experiment_device
 from train.train_ctcr import train_ctcr_sae
@@ -98,6 +98,52 @@ def _write_synthetic_dataset_artifacts(run_dir: Path, name: str, rows: List[Dict
     out_dir = run_dir / "synthetic_datasets"
     write_jsonl(out_dir / f"{name}.jsonl", rows)
     write_json(out_dir / f"{name}_summary.json", summary)
+
+
+def _write_synthetic_audit_exports(run_dir: Path, sleeper_examples: List[ConversationExample] | None = None, arf_pairs=None, limit_per_family: int = 50) -> None:
+    out_dir = run_dir / "synthetic_datasets"
+    if sleeper_examples:
+        rows = []
+        counts: Dict[str, int] = defaultdict(int)
+        for ex in sleeper_examples:
+            key = f"{ex.family}:{ex.mode}"
+            if counts[key] >= max(1, limit_per_family // 4):
+                continue
+            counts[key] += 1
+            rows.append({
+                "dataset": "constructed_sleeper",
+                "id": ex.id,
+                "family": ex.family,
+                "mode": ex.mode,
+                "target": ex.target,
+                "split": ex.split,
+                "source_is_benign": ex.source_is_benign,
+                "condition_order": (ex.metadata or {}).get("condition_order", ""),
+                "residual_group": (ex.metadata or {}).get("residual_group", ""),
+                "prompt_text": ex.prompt_text,
+            })
+        pd.DataFrame(rows).to_csv(out_dir / "constructed_sleeper_audit.csv", index=False)
+    if arf_pairs is not None:
+        rows = []
+        counts: Dict[str, int] = defaultdict(int)
+        for pair in arf_pairs:
+            if counts[pair.family] >= limit_per_family:
+                continue
+            counts[pair.family] += 1
+            rows.append({
+                "dataset": "attack_residual_fingerprints",
+                "id": pair.id,
+                "family": pair.family,
+                "split": pair.split,
+                "template_holdout": bool(pair.metadata.get("template_holdout", False)),
+                "residual_type": pair.metadata.get("residual_type", ""),
+                "control_type": pair.metadata.get("control_type", ""),
+                "base_source": (pair.metadata.get("base_harmful") or {}).get("base_source", ""),
+                "base_example_id": (pair.metadata.get("base_harmful") or {}).get("base_example_id", ""),
+                "attack_prompt": pair.attack_prompt,
+                "control_prompts": "\n---CONTROL---\n".join(pair.control_prompts),
+            })
+        pd.DataFrame(rows).to_csv(out_dir / "attack_residual_fingerprints_audit.csv", index=False)
 
 
 def _sleeper_synthetic_summary(examples: List[ConversationExample]) -> Dict[str, Any]:
@@ -171,8 +217,80 @@ def _arf_synthetic_summary(pairs) -> Dict[str, Any]:
             "deterministic generation from seed and saved source_index metadata",
             "compact residuals are computed as attack hidden state minus mean matched control hidden state",
             "bag-of-words lexical baseline is exported to test whether attack family is trivially recoverable from surface text",
+            "template-holdout variants are forced into test where configured",
         ],
     }
+
+
+def _synthetic_validation_rows(sleeper_examples: List[ConversationExample], arf_pairs=None) -> List[Dict[str, Any]]:
+    rows: List[Dict[str, Any]] = []
+    sleeper_required = {
+        "both_conditions",
+        "only_condition_a",
+        "only_condition_b",
+        "neither_condition",
+        "b_then_a",
+        "same_turn_ab",
+        "a_gap_b",
+        "a_interrupt_b",
+        "a_reset_b",
+        "decoy_a_then_b",
+        "a_then_decoy_b",
+        "a_long_gap_b",
+        "shuffled_turns",
+        "single_turn_compressed",
+    }
+    if sleeper_examples:
+        by_group: Dict[str, set] = defaultdict(set)
+        for ex in sleeper_examples:
+            key = str((ex.metadata or {}).get("residual_group", ""))
+            if key:
+                by_group[key].add(ex.mode)
+        complete = sum(1 for modes in by_group.values() if sleeper_required.issubset(modes))
+        duplicate_rate = 1.0 - (len({ex.prompt_text for ex in sleeper_examples}) / max(len(sleeper_examples), 1))
+        rows.append({
+            "dataset": "constructed_sleeper",
+            "check": "complete_sequence_control_groups",
+            "value": complete,
+            "expected": len(by_group),
+            "passed": complete == len(by_group),
+        })
+        rows.append({
+            "dataset": "constructed_sleeper",
+            "check": "duplicate_prompt_rate",
+            "value": duplicate_rate,
+            "expected": 0.05,
+            "passed": duplicate_rate <= 0.05,
+        })
+    if arf_pairs is not None:
+        pairs = list(arf_pairs)
+        n = max(len(pairs), 1)
+        real_count = sum(1 for pair in pairs if str(pair.metadata.get("construction", "")).startswith("real_prompt_derived"))
+        holdout_count = sum(1 for pair in pairs if bool(pair.metadata.get("template_holdout", False)))
+        rows.extend([
+            {
+                "dataset": "attack_residual_fingerprints",
+                "check": "real_prompt_derived_rate",
+                "value": real_count / n,
+                "expected": 0.95,
+                "passed": (real_count / n) >= 0.95,
+            },
+            {
+                "dataset": "attack_residual_fingerprints",
+                "check": "template_holdout_pairs",
+                "value": holdout_count,
+                "expected": 1,
+                "passed": holdout_count >= 1,
+            },
+            {
+                "dataset": "attack_residual_fingerprints",
+                "check": "all_pairs_have_controls",
+                "value": sum(1 for pair in pairs if len(pair.control_prompts) > 0),
+                "expected": len(pairs),
+                "passed": all(len(pair.control_prompts) > 0 for pair in pairs),
+            },
+        ])
+    return rows
 
 
 def _targets(examples: List[ConversationExample]) -> torch.Tensor:
@@ -204,6 +322,8 @@ def build_all_datasets(cfg: Dict[str, Any], run_dir: Path, seed: int, logger):
         [ex.to_dict() for ex in sleeper],
         _sleeper_synthetic_summary(sleeper),
     )
+    pd.DataFrame(_synthetic_validation_rows(sleeper)).to_csv(run_dir / "synthetic_datasets" / "constructed_sleeper_validation.csv", index=False)
+    _write_synthetic_audit_exports(run_dir, sleeper_examples=sleeper, limit_per_family=int(cfg.get("data", {}).get("audit_examples_per_family", 50)))
     summary = [
         {"group": "ordinary_harmful_benign", "source": "allenai/wildjailbreak", "n": len(wild), "note": "Gated WildJailbreak; train/eval configs adapted by data_type."},
         {"group": "ordinary_multiturn_jailbreak", "source": cfg.get("multiturn_dataset", "ScaleAI/mhj"), "n": len(multi), "note": note},
@@ -421,16 +541,21 @@ def _run_attack_fingerprints(
         [pair.to_dict() for pair in pairs],
         _arf_synthetic_summary(pairs),
     )
+    pd.DataFrame(_synthetic_validation_rows([], pairs)).to_csv(run_dir / "synthetic_datasets" / f"attack_residual_fingerprints_seed_{seed}_validation.csv", index=False)
+    _write_synthetic_audit_exports(run_dir, arf_pairs=pairs, limit_per_family=int(cfg.get("data", {}).get("audit_examples_per_family", 50)))
     train_pairs = [pair for pair in pairs if pair.split == "train"]
     val_pairs = [pair for pair in pairs if pair.split == "val"]
     test_pairs = [pair for pair in pairs if pair.split == "test"]
+    template_holdout_pairs = [pair for pair in test_pairs if bool(pair.metadata.get("template_holdout", False))]
     train_resid, train_labels, train_raw = extract_attack_residuals(subject, train_pairs, cfg, intercept_layer, logger)
     train_resid = train_resid.to(subject.device).float()
     arf_sae, arf_clf, arf_stats = train_arf_sae_classifier(train_resid, train_labels, cfg, subject.hidden_size, run_dir / "checkpoints", seed, logger)
     rows: List[Dict[str, Any]] = []
     lexical_rows: List[Dict[str, Any]] = []
     raw_rows: List[Dict[str, Any]] = [{**row, "seed": seed} for row in train_raw]
-    for split, split_pairs in [("train", train_pairs), ("val", val_pairs), ("test", test_pairs)]:
+    for split, split_pairs in [("train", train_pairs), ("val", val_pairs), ("test", test_pairs), ("template_holdout", template_holdout_pairs)]:
+        if not split_pairs:
+            continue
         if split == "train":
             resid, labels = train_resid, train_labels
         else:
@@ -702,6 +827,8 @@ def main() -> None:
     ctcr_df = pd.DataFrame(all_ctcr)
     arf_df = pd.DataFrame(all_arf)
     arf_raw_df = pd.DataFrame(all_arf_raw)
+    arf_diag_df = pd.DataFrame(arf_diagnostic_rows(all_arf))
+    arf_sig_df = pd.DataFrame(arf_significance_rows(all_arf))
     sig_df = pd.DataFrame(significance_rows(all_metrics))
     dataset_df = pd.DataFrame(dataset_summary)
     config_df = pd.DataFrame([{"key": k, "value": str(v)} for k, v in cfg.items()])
@@ -718,8 +845,12 @@ def main() -> None:
     ctcr_df.to_csv(run_dir / "raw_metrics" / "ctcr_residuals.csv", index=False)
     arf_df.to_csv(run_dir / "raw_metrics" / "attack_residual_fingerprints.csv", index=False)
     arf_raw_df.to_csv(run_dir / "raw_metrics" / "attack_residual_pairs.csv", index=False)
+    arf_diag_df.to_csv(run_dir / "raw_metrics" / "attack_residual_diagnostics.csv", index=False)
+    arf_sig_df.to_csv(run_dir / "raw_metrics" / "attack_residual_significance.csv", index=False)
     export_tables(metrics_df, sig_df, dataset_df, config_df, run_dir / "tables")
     arf_df.to_csv(run_dir / "tables" / "attack_residual_fingerprints.csv", index=False)
+    arf_diag_df.to_csv(run_dir / "tables" / "attack_residual_diagnostics.csv", index=False)
+    arf_sig_df.to_csv(run_dir / "tables" / "attack_residual_significance.csv", index=False)
     make_main_figures(metrics_df, feature_df, run_dir / "figures")
     make_appendix_figures(metrics_df, feature_df, locality_df, run_dir / "figures")
     make_mechanistic_claim_figures(taxonomy_df, conjunction_df, causal_df, run_dir / "figures")

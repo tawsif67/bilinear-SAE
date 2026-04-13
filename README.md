@@ -358,10 +358,16 @@ Important files:
 - `raw_metrics/ctcr_residuals.csv`
 - `raw_metrics/attack_residual_fingerprints.csv`
 - `raw_metrics/attack_residual_pairs.csv`
+- `raw_metrics/attack_residual_diagnostics.csv`
+- `raw_metrics/attack_residual_significance.csv`
 - `synthetic_datasets/constructed_sleeper_dataset.jsonl`
 - `synthetic_datasets/constructed_sleeper_dataset_summary.json`
 - `synthetic_datasets/attack_residual_fingerprints_seed_<seed>.jsonl`
 - `synthetic_datasets/attack_residual_fingerprints_seed_<seed>_summary.json`
+- `synthetic_datasets/constructed_sleeper_validation.csv`
+- `synthetic_datasets/constructed_sleeper_audit.csv`
+- `synthetic_datasets/attack_residual_fingerprints_seed_<seed>_validation.csv`
+- `synthetic_datasets/attack_residual_fingerprints_audit.csv`
 - `raw_metrics/causal_interventions.csv`
 - `raw_metrics/null_controls.csv`
 - `raw_metrics/transfer_results.csv`
@@ -369,6 +375,8 @@ Important files:
 - `tables/main_results.csv`
 - `tables/significance.csv`
 - `tables/attack_residual_fingerprints.csv`
+- `tables/attack_residual_diagnostics.csv`
+- `tables/attack_residual_significance.csv`
 - `tables/dataset_summary.csv`
 - `tables/config_summary.csv`
 - `tables/table_main_results.tex`
@@ -383,10 +391,20 @@ Important files:
 - `figures/fig8_arf_residual_norms.pdf`
 - `figures/fig9_arf_residual_types.pdf`
 - `figures/fig10_arf_generalization.pdf`
+- `figures/fig11_arf_vs_lexical.pdf`
 
 Figures are saved as both PDF and PNG where applicable.
 
 The `synthetic_datasets/` directory is intended for paper/letter artifacts. It stores the exact constructed sleeper examples, ARF attack/control prompts, split labels, matched-control metadata, real-source provenance for prompt-derived transformations, and robustness summaries used in the run.
+
+Robustness checks now include:
+
+- template-holdout ARF evaluation where configured
+- bag-of-words lexical leakage baseline
+- ARF-SAE vs lexical baseline diagnostics and significance exports
+- synthetic dataset validation CSVs
+- audit-ready CSV samples for constructed sleeper and ARF examples
+- real-prompt-derived provenance fields for ARF transformations
 
 ## Main Experiments
 

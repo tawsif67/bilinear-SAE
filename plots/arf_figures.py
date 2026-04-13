@@ -96,6 +96,22 @@ def figure_arf_generalization(arf: pd.DataFrame, out_dir: Path) -> None:
     save_fig(fig, out_dir, "fig10_arf_generalization")
 
 
+def figure_arf_vs_lexical(arf: pd.DataFrame, out_dir: Path) -> None:
+    setup_style()
+    data = arf[(arf["family"] == "all") & (arf["split"].isin(["test", "template_holdout"]))].copy()
+    if data.empty:
+        return
+    if "method" not in data.columns:
+        data["method"] = "arf_sae"
+    fig, ax = plt.subplots(figsize=(8.8, 5.2))
+    sns.barplot(data=data, x="split", y="accuracy", hue="method", ax=ax, errorbar=("ci", 95))
+    ax.set_title("ARF-SAE vs lexical baseline")
+    ax.set_xlabel("Evaluation split")
+    ax.set_ylabel("Attack-family accuracy")
+    ax.set_ylim(0, 1.05)
+    save_fig(fig, out_dir, "fig11_arf_vs_lexical")
+
+
 def make_arf_figures(arf: pd.DataFrame, pairs: pd.DataFrame, out_dir: Path) -> None:
     _require_arf(arf, pairs)
     figure_arf_accuracy(arf, out_dir)
@@ -103,3 +119,4 @@ def make_arf_figures(arf: pd.DataFrame, pairs: pd.DataFrame, out_dir: Path) -> N
     figure_arf_residual_norms(pairs, out_dir)
     figure_arf_residual_types(pairs, out_dir)
     figure_arf_generalization(arf, out_dir)
+    figure_arf_vs_lexical(arf, out_dir)
