@@ -38,6 +38,7 @@ from train.train_lora import train_lora
 from train.train_sae import train_saes
 from utils.config_utils import load_config
 from utils.dependencies import assert_runtime_dependencies
+from utils.gpu_memory import clear_cuda_cache, cuda_memory_snapshot, is_cuda_oom, log_cuda_memory, tune_batch_sizes_for_memory
 from utils.io import make_run_dir, stable_hash, write_json, write_jsonl, write_yaml
 from utils.logging_utils import setup_logging
 from utils.seed import set_seed
@@ -163,7 +164,7 @@ def _guarded_responses(base_responses: List[str], scores: np.ndarray, threshold:
     return responses, flags.tolist()
 
 
-def _defended_perplexity(subject, cfg: Dict[str, Any]) -> float:
+def _defended_perplexity(subject, cfg: Dict[str, Any], logger=None) -> float:
     try:
         ds = load_dataset("wikitext", "wikitext-2-raw-v1", split="test", streaming=True)
     except Exception:
@@ -182,15 +183,29 @@ def _defended_perplexity(subject, cfg: Dict[str, Any]) -> float:
     total_loss = 0.0
     total_toks = 0
     ce = torch.nn.CrossEntropyLoss(reduction="none")
+    batch_size = max(1, int(cfg["eval"]["batch_size"]))
     with torch.inference_mode():
-        for i in range(0, len(texts), int(cfg["eval"]["batch_size"])):
-            bx = enc["input_ids"][i:i + int(cfg["eval"]["batch_size"])].to(subject.device)
-            bm = enc["attention_mask"][i:i + int(cfg["eval"]["batch_size"])].to(subject.device)
-            logits = subject.model(input_ids=bx, attention_mask=bm).logits
-            loss = ce(logits[:, :-1].contiguous().view(-1, logits.size(-1)), bx[:, 1:].contiguous().view(-1))
-            loss = loss.view(bx.size(0), -1)
-            total_loss += (loss * bm[:, 1:]).sum().item()
-            total_toks += bm[:, 1:].sum().item()
+        i = 0
+        while i < len(texts):
+            cur = min(batch_size, len(texts) - i)
+            bx = enc["input_ids"][i:i + cur].to(subject.device)
+            bm = enc["attention_mask"][i:i + cur].to(subject.device)
+            try:
+                logits = subject.model(input_ids=bx, attention_mask=bm).logits
+                loss = ce(logits[:, :-1].contiguous().view(-1, logits.size(-1)), bx[:, 1:].contiguous().view(-1))
+                loss = loss.view(bx.size(0), -1)
+                total_loss += (loss * bm[:, 1:]).sum().item()
+                total_toks += bm[:, 1:].sum().item()
+                i += cur
+            except RuntimeError as e:
+                if not is_cuda_oom(e) or batch_size <= 1:
+                    snap = cuda_memory_snapshot(subject.device)
+                    raise RuntimeError(f"Perplexity evaluation failed at batch_size={batch_size}; GPU memory snapshot={snap}") from e
+                batch_size = max(1, batch_size // 2)
+                clear_cuda_cache(subject.device)
+                if logger is not None:
+                    logger.warning("Perplexity OOM; retrying with eval batch_size=%d.", batch_size)
+                log_cuda_memory(logger, "after_perplexity_oom_retry", subject.device)
     return float(np.exp(total_loss / max(total_toks, 1)))
 
 
@@ -223,13 +238,18 @@ def run_seed(seed: int, cfg: Dict[str, Any], run_dir: Path, datasets: Dict[str, 
     set_seed(seed)
     selected = _select_eval_examples(datasets, cfg)
     device = require_full_experiment_device(bool(cfg.get("require_gpu", True)))
+    cfg = tune_batch_sizes_for_memory(cfg, logger, device)
     subject = SubjectModel(cfg, device)
+    log_cuda_memory(logger, f"after_subject_load_seed_{seed}", device)
+    write_json(run_dir / "raw_metrics" / f"gpu_memory_after_subject_seed_{seed}.json", cuda_memory_snapshot(device))
+    cfg = tune_batch_sizes_for_memory(cfg, logger, device)
+    write_yaml(run_dir / f"config_runtime_seed_{seed}.yaml", cfg)
     lora_train = selected["train"][: int(cfg.get("train_subsample", len(selected["train"])))]
     train_lora(subject, lora_train, cfg, seed, run_dir / "checkpoints", logger)
     intercept_layer = int(cfg["intercept_layers"][0])
 
-    train_h, _ = extract_hidden_trajectories(subject, selected["train"], cfg, intercept_layer)
-    val_h, _ = extract_hidden_trajectories(subject, selected["val"], cfg, intercept_layer)
+    train_h, _ = extract_hidden_trajectories(subject, selected["train"], cfg, intercept_layer, logger)
+    val_h, _ = extract_hidden_trajectories(subject, selected["val"], cfg, intercept_layer, logger)
     train_h = train_h.to(device).float()
     val_h = val_h.to(device).float()
     train_y = _targets(selected["train"]).to(device)
@@ -289,22 +309,24 @@ def run_seed(seed: int, cfg: Dict[str, Any], run_dir: Path, datasets: Dict[str, 
     taxonomy_rows: List[Dict[str, Any]] = []
     causal_rows: List[Dict[str, Any]] = []
     layer_rows = layer_summary_rows(train_h, train_y, seed, intercept_layer, "train")
-    ppx = _defended_perplexity(subject, cfg)
+    ppx = _defended_perplexity(subject, cfg, logger)
 
     for group, examples in selected.items():
         if group in {"train", "val"} or not examples:
             continue
-        eval_h, _ = extract_hidden_trajectories(subject, examples, cfg, intercept_layer)
+        eval_h, _ = extract_hidden_trajectories(subject, examples, cfg, intercept_layer, logger)
         eval_h = eval_h.to(device).float()
         eval_y = _targets(examples).to(device)
         scores = score_methods(eval_h, model_bundle, eval_y)
         taxonomy_rows.extend(mechanistic_taxonomy_rows(examples, scores, seed, group))
         causal_rows.extend(causal_intervention_rows(examples, eval_h, linear_sae, bilinear_sae, bad_feats, seed, group))
         layer_rows.extend(layer_summary_rows(eval_h, eval_y, seed, intercept_layer, group))
-        base_responses, tok_sec = generate_responses(subject, examples, cfg)
+        base_responses, tok_sec = generate_responses(subject, examples, cfg, logger)
         processor, judge_model = judge
         judge_batch_size = int(cfg["eval"].get("judge_batch_size", min(4, int(cfg["eval"]["batch_size"]))))
-        base_preds = judge_predictions(processor, judge_model, [ex.prompt_text for ex in examples], base_responses, int(cfg["max_seq_len"]), judge_batch_size)
+        log_cuda_memory(logger, f"before_judge_{seed}_{group}", device)
+        base_preds = judge_predictions(processor, judge_model, [ex.prompt_text for ex in examples], base_responses, int(cfg["max_seq_len"]), judge_batch_size, logger)
+        log_cuda_memory(logger, f"after_judge_{seed}_{group}", device)
         base_rows = [{"target": ex.target, "judge_pred": pred, "score": pred, "family_holdout": ex.family_holdout, "is_ood": ex.is_ood} for ex, pred in zip(examples, base_preds)]
         base_asr = compute_metrics(base_rows).get("asr", 0.0)
         for method in METHODS:
@@ -374,9 +396,17 @@ def main() -> None:
     write_json(run_dir / "raw_metrics" / "config_hash.json", {"config_hash": stable_hash(cfg), "python": platform.python_version(), "torch": torch.__version__})
 
     device = require_full_experiment_device(bool(cfg.get("require_gpu", True)))
+    write_json(run_dir / "raw_metrics" / "gpu_memory_initial.json", cuda_memory_snapshot(device))
+    log_cuda_memory(logger, "initial", device)
+    cfg = tune_batch_sizes_for_memory(cfg, logger, device)
+    write_yaml(run_dir / "config_runtime.yaml", cfg)
     assert_judge_access(cfg["judge_model"])
     datasets, dataset_summary = build_all_datasets(cfg, run_dir, int(cfg["eval"]["seeds"][0]), logger)
     judge = load_judge(cfg["judge_model"], device)
+    log_cuda_memory(logger, "after_judge_load", device)
+    write_json(run_dir / "raw_metrics" / "gpu_memory_after_judge_load.json", cuda_memory_snapshot(device))
+    cfg = tune_batch_sizes_for_memory(cfg, logger, device)
+    write_yaml(run_dir / "config_runtime.yaml", cfg)
     write_json(run_dir / "raw_metrics" / "judge_sanity.json", sanity_check_judge(*judge))
 
     all_metrics: List[Dict[str, Any]] = []

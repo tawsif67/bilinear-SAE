@@ -5,11 +5,11 @@ from typing import Any, Dict
 
 import torch
 import torch.nn.functional as F
-from torch.utils.data import DataLoader, TensorDataset
 from tqdm.auto import tqdm
 
 from models.fusion import FusionHead
 from models.trajectory import TrajectoryEncoder
+from utils.gpu_memory import clear_cuda_cache, cuda_memory_snapshot, is_cuda_oom, log_cuda_memory
 
 
 def _sparse_scores(h_seq: torch.Tensor, linear_sae, bilinear_sae, bad_feats: Dict[str, torch.Tensor]) -> tuple[torch.Tensor, torch.Tensor]:
@@ -25,6 +25,7 @@ def train_fuser(h_seq: torch.Tensor, y: torch.Tensor, linear_sae, bilinear_sae, 
     if h_seq.size(0) == 0:
         raise RuntimeError("Cannot train trajectory/fuser on an empty hidden-state tensor.")
     h_seq = h_seq.float()
+    y = y.to(h_seq.device).float()
     traj_cfg = cfg["trajectory_encoder"]
     fuser_cfg = cfg["fuser"]
     encoder = TrajectoryEncoder(d_model, int(traj_cfg["heads"]), int(traj_cfg["layers"]), float(traj_cfg["dropout"])).to(h_seq.device)
@@ -35,30 +36,39 @@ def train_fuser(h_seq: torch.Tensor, y: torch.Tensor, linear_sae, bilinear_sae, 
         p.requires_grad = False
     for p in bilinear_sae.parameters():
         p.requires_grad = False
-    dl = DataLoader(TensorDataset(h_seq, y.float()), batch_size=int(fuser_cfg["batch_size"]), shuffle=True)
+    batch_size = max(1, int(fuser_cfg["batch_size"]))
     opt = torch.optim.AdamW(list(encoder.parameters()) + list(fuser.parameters()), lr=float(fuser_cfg["lr"]))
-    it = iter(dl)
     pbar = tqdm(range(int(fuser_cfg["steps"])), desc=f"Fuser seed {seed}", leave=False)
     last_loss = 0.0
     for _ in pbar:
-        try:
-            bh, by = next(it)
-        except StopIteration:
-            it = iter(dl)
-            bh, by = next(it)
-        opt.zero_grad(set_to_none=True)
-        threat, delta = encoder(bh)
-        s1, s2 = _sparse_scores(bh, linear_sae, bilinear_sae, bad_feats)
-        pred = fuser(s1, s2, threat[:, -1].float())
-        target_traj = torch.zeros_like(threat)
-        target_traj[by.bool(), 1] = 0.5
-        target_traj[by.bool(), 2] = 1.0
-        loss = F.binary_cross_entropy(pred, by) + 0.5 * F.mse_loss(threat, target_traj) + 0.05 * delta.abs().mean()
-        loss.backward()
-        torch.nn.utils.clip_grad_norm_(list(encoder.parameters()) + list(fuser.parameters()), 1.0)
-        opt.step()
-        last_loss = float(loss.detach().cpu())
-        pbar.set_postfix(loss=last_loss)
+        while True:
+            idx = torch.randint(0, h_seq.size(0), (min(batch_size, h_seq.size(0)),), device=h_seq.device)
+            bh = h_seq[idx]
+            by = y[idx]
+            try:
+                opt.zero_grad(set_to_none=True)
+                threat, delta = encoder(bh)
+                s1, s2 = _sparse_scores(bh, linear_sae, bilinear_sae, bad_feats)
+                pred = fuser(s1, s2, threat[:, -1].float())
+                target_traj = torch.zeros_like(threat)
+                target_traj[by.bool(), 1] = 0.5
+                target_traj[by.bool(), 2] = 1.0
+                loss = F.binary_cross_entropy(pred, by) + 0.5 * F.mse_loss(threat, target_traj) + 0.05 * delta.abs().mean()
+                loss.backward()
+                torch.nn.utils.clip_grad_norm_(list(encoder.parameters()) + list(fuser.parameters()), 1.0)
+                opt.step()
+                last_loss = float(loss.detach().cpu())
+                pbar.set_postfix(loss=last_loss, batch_size=batch_size)
+                break
+            except RuntimeError as e:
+                if not is_cuda_oom(e) or batch_size <= 1:
+                    snap = cuda_memory_snapshot(h_seq.device)
+                    raise RuntimeError(f"Fuser training failed at batch_size={batch_size}; GPU memory snapshot={snap}") from e
+                batch_size = max(1, batch_size // 2)
+                clear_cuda_cache(h_seq.device)
+                if logger is not None:
+                    logger.warning("Fuser OOM; retrying with batch_size=%d.", batch_size)
+                log_cuda_memory(logger, "after_fuser_oom_retry", h_seq.device)
     checkpoint_dir.mkdir(parents=True, exist_ok=True)
     torch.save({"trajectory": encoder.state_dict(), "fuser": fuser.state_dict()}, checkpoint_dir / f"fuser_seed_{seed}.pt")
     logger.info("Saved fuser checkpoint for seed %d", seed)

@@ -6,6 +6,8 @@ import torch
 from huggingface_hub import model_info
 from transformers import AutoProcessor
 
+from utils.gpu_memory import clear_cuda_cache, cuda_memory_snapshot, is_cuda_oom, log_cuda_memory
+
 try:
     from transformers import Gemma3ForConditionalGeneration
 except Exception:
@@ -144,7 +146,7 @@ def _last_token_logits(model, batch):
     return logits[:, -1, :]
 
 
-def judge_predictions(processor, model, requests: List[str], responses: List[str], max_seq_len: int = 384, batch_size: int = 4) -> List[int]:
+def judge_predictions(processor, model, requests: List[str], responses: List[str], max_seq_len: int = 384, batch_size: int = 4, logger=None) -> List[int]:
     prompts = [JUDGE_PROMPT.format(request=rq, response=rs) for rq, rs in zip(requests, responses)]
     device = next(model.parameters()).device
     tok = processor.tokenizer
@@ -158,17 +160,29 @@ def judge_predictions(processor, model, requests: List[str], responses: List[str
     preds: List[int] = []
     with torch.inference_mode():
         try:
-            for start in range(0, len(prompts), max(1, int(batch_size))):
-                chunk = prompts[start:start + max(1, int(batch_size))]
-                batch = processor(text=chunk, return_tensors="pt", padding=True, truncation=True, max_length=max_seq_len).to(device)
-                last_logits = _last_token_logits(model, batch)
-                one_score = torch.logsumexp(last_logits[:, one_ids].float(), dim=-1)
-                zero_score = torch.logsumexp(last_logits[:, zero_ids].float(), dim=-1)
-                preds.extend((one_score > zero_score).long().cpu().tolist())
+            cur_batch = max(1, int(batch_size))
+            start = 0
+            while start < len(prompts):
+                chunk = prompts[start:start + cur_batch]
+                try:
+                    batch = processor(text=chunk, return_tensors="pt", padding=True, truncation=True, max_length=max_seq_len).to(device)
+                    last_logits = _last_token_logits(model, batch)
+                    one_score = torch.logsumexp(last_logits[:, one_ids].float(), dim=-1)
+                    zero_score = torch.logsumexp(last_logits[:, zero_ids].float(), dim=-1)
+                    preds.extend((one_score > zero_score).long().cpu().tolist())
+                    start += len(chunk)
+                except RuntimeError as e:
+                    if not is_cuda_oom(e) or cur_batch <= 1:
+                        snap = cuda_memory_snapshot(device)
+                        raise RuntimeError(f"Gemma judge failed at batch_size={cur_batch}; GPU memory snapshot={snap}") from e
+                    cur_batch = max(1, cur_batch // 2)
+                    clear_cuda_cache(device)
+                    if logger is not None:
+                        logger.warning("Gemma judge OOM; retrying with judge_batch_size=%d.", cur_batch)
+                    log_cuda_memory(logger, "after_judge_oom_retry", device)
         finally:
             tok.padding_side = old_padding
-            if device.type == "cuda":
-                torch.cuda.empty_cache()
+            clear_cuda_cache(device)
     return preds
 
 

@@ -50,3 +50,5 @@ data:
   sleeper_per_family: 90
   sleeper_ood_per_family: 45
   wikitext_batches: 4
+memory:
+  auto_tune: true

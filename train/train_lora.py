@@ -10,10 +10,10 @@ except ImportError:
     LoraConfig = None
     TaskType = None
     get_peft_model = None
-from torch.utils.data import DataLoader, TensorDataset
 from tqdm.auto import tqdm
 
 from data.loaders import ConversationExample
+from utils.gpu_memory import clear_cuda_cache, cuda_memory_snapshot, is_cuda_oom, log_cuda_memory
 
 
 def _compliance_response(target: int) -> str:
@@ -98,18 +98,37 @@ def train_lora(subject, examples: List[ConversationExample], cfg: Dict[str, Any]
     if not train_examples:
         raise RuntimeError("LoRA training set is empty after sampling.")
     x, m, labels = prepare_lora_tensors(train_examples, subject.tokenizer, int(cfg["max_seq_len"]))
-    dl = DataLoader(TensorDataset(x, m, labels), batch_size=int(cfg["lora"]["batch_size"]), shuffle=True)
     opt = torch.optim.AdamW([p for p in subject.model.parameters() if p.requires_grad], lr=float(cfg["lora"]["lr"]))
     device = subject.device
+    batch_size = max(1, int(cfg["lora"]["batch_size"]))
     for epoch in range(int(cfg["lora"]["epochs"])):
-        pbar = tqdm(dl, desc=f"LoRA seed {seed} epoch {epoch}", leave=False)
-        for bx, bm, by in pbar:
-            opt.zero_grad(set_to_none=True)
-            out = subject.model(input_ids=bx.to(device), attention_mask=bm.to(device), labels=by.to(device))
-            out.loss.backward()
-            torch.nn.utils.clip_grad_norm_([p for p in subject.model.parameters() if p.requires_grad], 1.0)
-            opt.step()
-            pbar.set_postfix(loss=float(out.loss.detach().cpu()))
+        order = torch.randperm(x.size(0))
+        pbar = tqdm(total=x.size(0), desc=f"LoRA seed {seed} epoch {epoch}", leave=False)
+        i = 0
+        try:
+            while i < x.size(0):
+                idx = order[i:i + batch_size]
+                bx, bm, by = x[idx], m[idx], labels[idx]
+                try:
+                    opt.zero_grad(set_to_none=True)
+                    out = subject.model(input_ids=bx.to(device), attention_mask=bm.to(device), labels=by.to(device))
+                    out.loss.backward()
+                    torch.nn.utils.clip_grad_norm_([p for p in subject.model.parameters() if p.requires_grad], 1.0)
+                    opt.step()
+                    loss_value = float(out.loss.detach().cpu())
+                    i += len(idx)
+                    pbar.update(len(idx))
+                    pbar.set_postfix(loss=loss_value, batch_size=batch_size)
+                except RuntimeError as e:
+                    if not is_cuda_oom(e) or batch_size <= 1:
+                        snap = cuda_memory_snapshot(device)
+                        raise RuntimeError(f"LoRA training failed at batch_size={batch_size}; GPU memory snapshot={snap}") from e
+                    batch_size = max(1, batch_size // 2)
+                    clear_cuda_cache(device)
+                    logger.warning("LoRA OOM; retrying with batch_size=%d.", batch_size)
+                    log_cuda_memory(logger, "after_lora_oom_retry", device)
+        finally:
+            pbar.close()
     checkpoint_dir.mkdir(parents=True, exist_ok=True)
     path = checkpoint_dir / f"lora_seed_{seed}.pt"
     state = {k: v.detach().cpu() for k, v in subject.model.state_dict().items() if "lora" in k.lower()}
