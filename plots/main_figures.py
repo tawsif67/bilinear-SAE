@@ -74,7 +74,7 @@ def figure_generalization(metrics: pd.DataFrame, out_dir: Path) -> None:
     _require(metrics)
     setup_style()
     cols = ["in_family_asr_reduction", "family_holdout_asr", "ood_trigger_asr", "asr_reduction"]
-    data = metrics[metrics["method"].isin(["trajectory_only", "linear_sae_trajectory", "bilinear_sae_trajectory", "full_fused"])]
+    data = metrics[metrics["method"].isin(["trajectory_only", "linear_sae_trajectory", "bilinear_sae_trajectory", "ctcr_residual_bilinear", "full_fused"])]
     melted = data.melt(id_vars=["method"], value_vars=[c for c in cols if c in data.columns], var_name="setting", value_name="value")
     fig, ax = plt.subplots(figsize=(12, 5.5))
     sns.barplot(data=melted, x="setting", y="value", hue="method", ax=ax, errorbar=("ci", 95))

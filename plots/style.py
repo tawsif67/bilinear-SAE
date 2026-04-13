@@ -21,6 +21,7 @@ METHOD_ORDER = [
     "linear_sae_trajectory",
     "bilinear_sae_only",
     "bilinear_sae_trajectory",
+    "ctcr_residual_bilinear",
     "full_fused",
 ]
 

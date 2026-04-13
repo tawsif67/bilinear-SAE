@@ -1,14 +1,26 @@
-# Bilinear SAE: Sparse Conjunctions vs Trajectory Drift
+# CTCR-SAE: Cross-Turn Conjunction Residuals for Sleeper-Style Jailbreaks
 
 This repository contains a modular research pipeline for testing the claim:
 
-> We identify cross-turn conjunctions as a distinct internal mechanism of sleeper-style jailbreaks. Unlike ordinary multi-turn jailbreaks, which produce smooth representational drift, sleeper triggers can remain weakly detectable at the single-feature and trajectory levels until multiple latent conditions are jointly present. Bilinear sparse features expose these conjunctive states, support localized causal interventions, and generalize better to held-out trigger families than trajectory-only or linear sparse detectors.
+> We identify cross-turn conjunctions as a distinct internal mechanism of sleeper-style jailbreaks. Unlike ordinary multi-turn jailbreaks, which produce smooth representational drift, sleeper triggers can remain weakly detectable until multiple latent conditions are jointly present. We isolate this mechanism with a Cross-Turn Conjunction Residual, `h(A+B)-h(A)-h(B)+h(0)`, and sparse-code that residual with bilinear features for detection and localized intervention.
 
-The code is organized as a reproducible experiment stack rather than a single prototype script. It builds public-data and constructed-data benchmark groups, trains a LoRA-adapted subject model, extracts hidden-state trajectories, trains linear and bilinear sparse autoencoders, evaluates trajectory and sparse-feature baselines, runs mechanistic conjunction diagnostics, and exports paper-style metrics, figures, and LaTeX tables.
+The code is organized as a reproducible experiment stack rather than a single prototype script. It builds public-data and constructed-data benchmark groups, trains a LoRA-adapted subject model, extracts hidden-state trajectories, trains sparse autoencoders, computes CTCR residuals from matched sleeper controls, evaluates trajectory and sparse-feature baselines, runs mechanistic conjunction diagnostics, and exports paper-style metrics, figures, and LaTeX tables.
+
+## Core Idea: CTCR
+
+The main method is **CTCR-SAE**, not just "bilinear SAE plus a fuser."
+
+For each matched sleeper control block, the code computes:
+
+```text
+CTCR = h(A+B) - h(A only) - h(B only) + h(neither)
+```
+
+This residual isolates the hidden-state component that appears only when the two distributed trigger conditions jointly occur. A bilinear SAE is then trained on these residual vectors. The resulting method, `ctcr_residual_bilinear`, asks whether sleeper-style attacks are better explained by sparse interaction residuals than by ordinary drift or single-feature activation.
 
 ## What This Repo Does
 
-The pipeline compares twelve methods:
+The pipeline compares thirteen methods:
 
 1. Dense linear probe
 2. Dense MLP probe
@@ -21,9 +33,10 @@ The pipeline compares twelve methods:
 9. Linear SAE + trajectory
 10. Bilinear SAE only
 11. Bilinear SAE + trajectory
-12. Full fused method using linear sparse score, bilinear sparse score, trajectory score, and pairwise interactions
+12. CTCR residual bilinear SAE
+13. Full fused method using linear sparse score, bilinear sparse score, trajectory score, and pairwise interactions
 
-The main question is whether bilinear sparse features expose a distinct cross-turn conjunction mechanism, rather than merely acting as a more expressive generic detector.
+The main question is whether sleeper-style attacks produce sparse **conjunction residuals** that ordinary trajectory and linear sparse methods miss.
 
 ## Fixed Model Choices
 
@@ -78,7 +91,7 @@ The pipeline keeps real public data separate from constructed sleeper-trigger da
   - shuffled turns
   - single-turn compressed controls
 
-The constructed sleeper data uses redacted/proxy unsafe-compliance labels and does not generate actionable harmful completions.
+Each sleeper block stores a stable `residual_group` so `A+B`, `A`, `B`, and `0` controls remain together across deterministic splits. This is what makes CTCR computation possible without leakage. The constructed sleeper data uses redacted/proxy unsafe-compliance labels and does not generate actionable harmful completions.
 
 ## Repository Layout
 
@@ -102,9 +115,11 @@ The constructed sleeper data uses redacted/proxy unsafe-compliance labels and do
     baselines.py
     fusion.py
     interventions.py
+    ctcr.py
   train/
     train_lora.py
     train_sae.py
+    train_ctcr.py
     train_fuser.py
   eval/
     judge.py
@@ -129,6 +144,7 @@ The constructed sleeper data uses redacted/proxy unsafe-compliance labels and do
     logging_utils.py
     config_utils.py
     dependencies.py
+    gpu_memory.py
   scripts/
     check_imports.cmd
     check_imports.ps1
@@ -290,6 +306,7 @@ Important files:
 - `raw_metrics/intervention_locality.csv`
 - `raw_metrics/mechanistic_taxonomy.csv`
 - `raw_metrics/conjunction_controls.csv`
+- `raw_metrics/ctcr_residuals.csv`
 - `raw_metrics/causal_interventions.csv`
 - `raw_metrics/null_controls.csv`
 - `raw_metrics/transfer_results.csv`

@@ -22,6 +22,7 @@ def mechanistic_taxonomy_rows(examples: List[ConversationExample], scores: Dict[
     bilinear = _rank01(np.asarray(scores["bilinear_sae_only"], dtype=float))
     trajectory = _rank01(np.asarray(scores["trajectory_only"], dtype=float))
     full = _rank01(np.asarray(scores["full_fused"], dtype=float))
+    ctcr = _rank01(np.asarray(scores.get("ctcr_residual_bilinear", np.zeros_like(full)), dtype=float))
     rows: List[Dict[str, Any]] = []
     for i, ex in enumerate(examples):
         bilinear_gain = float(bilinear[i] - max(linear[i], trajectory[i]))
@@ -30,7 +31,9 @@ def mechanistic_taxonomy_rows(examples: List[ConversationExample], scores: Dict[
             category = "conjunction_dominant"
         elif trajectory_gain > 0.15 and trajectory[i] >= 0.6:
             category = "trajectory_drift_dominant"
-        elif full[i] >= 0.6 and max(bilinear[i], trajectory[i]) >= 0.5:
+        elif ctcr[i] >= 0.6 and bilinear_gain > 0.0:
+            category = "ctcr_conjunction_residual"
+        elif full[i] >= 0.6 and max(bilinear[i], trajectory[i], ctcr[i]) >= 0.5:
             category = "mixed"
         else:
             category = "weak_or_neither"
@@ -50,6 +53,7 @@ def mechanistic_taxonomy_rows(examples: List[ConversationExample], scores: Dict[
             "bilinear_feature_score": float(bilinear[i]),
             "trajectory_score": float(trajectory[i]),
             "full_fused_score": float(full[i]),
+            "ctcr_residual_score": float(ctcr[i]),
             "bilinear_gain_over_single_and_traj": bilinear_gain,
             "trajectory_gain_over_sparse": trajectory_gain,
             "mechanistic_category": category,

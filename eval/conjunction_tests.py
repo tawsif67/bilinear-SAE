@@ -5,7 +5,7 @@ from typing import Any, Dict, List
 import pandas as pd
 
 
-SCORE_COLUMNS = ["linear_feature_score", "bilinear_feature_score", "trajectory_score", "full_fused_score"]
+SCORE_COLUMNS = ["linear_feature_score", "bilinear_feature_score", "trajectory_score", "ctcr_residual_score", "full_fused_score"]
 
 
 def conjunction_control_rows(taxonomy_rows: List[Dict[str, Any]]) -> List[Dict[str, Any]]:

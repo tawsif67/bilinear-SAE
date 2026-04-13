@@ -48,6 +48,47 @@ def deterministic_split(
     return splits
 
 
+def deterministic_group_split(
+    examples: Sequence[ConversationExample],
+    ratios: Tuple[float, float, float],
+    seed: int,
+    group_key: str,
+    stratify_key: str | None = None,
+) -> Dict[str, List[int]]:
+    rng = np.random.default_rng(seed)
+    grouped: Dict[str, List[int]] = defaultdict(list)
+    for i, ex in enumerate(examples):
+        key = str(getattr(ex, group_key, "") or (ex.metadata or {}).get(group_key, ""))
+        if not key:
+            key = f"ungrouped:{i}"
+        grouped[key].append(i)
+
+    buckets: Dict[str, List[str]] = defaultdict(list)
+    for key, idxs in grouped.items():
+        ex = examples[idxs[0]]
+        bucket = "all"
+        if stratify_key:
+            bucket = str(getattr(ex, stratify_key, "") or (ex.metadata or {}).get(stratify_key, "missing"))
+        buckets[bucket].append(key)
+
+    splits = {"train": [], "val": [], "test": []}
+    for keys in buckets.values():
+        arr = np.array(keys, dtype=object)
+        rng.shuffle(arr)
+        n_train, n_val, _ = _ratio_counts(len(arr), ratios)
+        for split_name, split_keys in [
+            ("train", arr[:n_train]),
+            ("val", arr[n_train:n_train + n_val]),
+            ("test", arr[n_train + n_val:]),
+        ]:
+            for key in split_keys.tolist():
+                splits[split_name].extend(grouped[str(key)])
+
+    for values in splits.values():
+        values.sort()
+    return splits
+
+
 def apply_split_labels(examples: Sequence[ConversationExample], splits: Dict[str, List[int]]) -> List[ConversationExample]:
     out = list(examples)
     for split_name, idxs in splits.items():

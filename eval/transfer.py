@@ -10,6 +10,7 @@ TRANSFER_SCORES = {
     "trajectory_only": "trajectory_score",
     "linear_sae_only": "linear_feature_score",
     "bilinear_sae_only": "bilinear_feature_score",
+    "ctcr_residual_bilinear": "ctcr_residual_score",
     "full_fused": "full_fused_score",
 }
 

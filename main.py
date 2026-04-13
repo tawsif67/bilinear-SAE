@@ -18,7 +18,7 @@ except ImportError:
 from data.loaders import ConversationExample, subsample_examples
 from data.multiturn_jailbreak import load_multiturn_jailbreak
 from data.sleeper_builder import build_sleeper_dataset
-from data.splits import apply_split_labels, deterministic_split, save_splits
+from data.splits import apply_split_labels, deterministic_group_split, deterministic_split, save_splits
 from data.wildjailbreak import load_wildjailbreak
 from eval.causal_interventions import causal_intervention_rows
 from eval.conjunction_tests import conjunction_control_rows
@@ -32,7 +32,9 @@ from eval.significance import significance_rows
 from eval.transfer import transfer_rows
 from models.baselines import ActivationProbe, DenseLinearProbe, mean_difference_vector, top_mean_difference_dims
 from models.baselines import TorchMLPProbe
+from models.ctcr import build_ctcr_residual_dataset, ctcr_analysis_rows, ctcr_scores_for_examples
 from models.subject import SubjectModel, require_full_experiment_device
+from train.train_ctcr import train_ctcr_sae
 from train.train_fuser import train_fuser
 from train.train_lora import train_lora
 from train.train_sae import train_saes
@@ -56,6 +58,7 @@ METHODS = [
     "linear_sae_trajectory",
     "bilinear_sae_only",
     "bilinear_sae_trajectory",
+    "ctcr_residual_bilinear",
     "full_fused",
 ]
 
@@ -64,8 +67,11 @@ def _targets(examples: List[ConversationExample]) -> torch.Tensor:
     return torch.tensor([ex.target for ex in examples], dtype=torch.long)
 
 
-def _split_and_save(run_dir: Path, name: str, examples: List[ConversationExample], ratios, seed: int, stratify_key: str | None) -> List[ConversationExample]:
-    splits = deterministic_split(examples, ratios, seed, stratify_key=stratify_key)
+def _split_and_save(run_dir: Path, name: str, examples: List[ConversationExample], ratios, seed: int, stratify_key: str | None, group_key: str | None = None) -> List[ConversationExample]:
+    if group_key:
+        splits = deterministic_group_split(examples, ratios, seed, group_key=group_key, stratify_key=stratify_key)
+    else:
+        splits = deterministic_split(examples, ratios, seed, stratify_key=stratify_key)
     examples = apply_split_labels(examples, splits)
     save_splits(run_dir, name, examples, splits)
     return examples
@@ -79,7 +85,7 @@ def build_all_datasets(cfg: Dict[str, Any], run_dir: Path, seed: int, logger):
     multi = _split_and_save(run_dir, "multiturn_jailbreak", multi, (0.60, 0.20, 0.20), seed, "family")
     benign = [ex.turns[-1]["content"] for ex in wild if ex.source_is_benign][:200]
     harmful = [ex.turns[-1]["content"] for ex in wild if ex.target == 1][:200]
-    sleeper = _split_and_save(run_dir, "constructed_sleeper", build_sleeper_dataset(cfg, seed, benign, harmful), (0.60, 0.20, 0.20), seed, "family")
+    sleeper = _split_and_save(run_dir, "constructed_sleeper", build_sleeper_dataset(cfg, seed, benign, harmful), (0.60, 0.20, 0.20), seed, "family", group_key="residual_group")
     summary = [
         {"group": "ordinary_harmful_benign", "source": "allenai/wildjailbreak", "n": len(wild), "note": "Gated WildJailbreak; train/eval configs adapted by data_type."},
         {"group": "ordinary_multiturn_jailbreak", "source": cfg.get("multiturn_dataset", "ScaleAI/mhj"), "n": len(multi), "note": note},
@@ -88,9 +94,49 @@ def build_all_datasets(cfg: Dict[str, Any], run_dir: Path, seed: int, logger):
     return {"wild": wild, "multi": multi, "sleeper": sleeper}, summary
 
 
+def _balanced_subsample(groups: List[List[ConversationExample]], budget: int) -> List[ConversationExample]:
+    nonempty = [list(group) for group in groups if group]
+    if budget <= 0:
+        return [ex for group in nonempty for ex in group]
+    if not nonempty:
+        return []
+
+    def take(group: List[ConversationExample], limit: int) -> tuple[List[ConversationExample], List[ConversationExample]]:
+        if not group or limit <= 0:
+            return [], group
+        if not any((ex.metadata or {}).get("residual_group") for ex in group):
+            return group[:limit], group[limit:]
+        selected: List[ConversationExample] = []
+        leftovers: List[ConversationExample] = []
+        by_group: Dict[str, List[ConversationExample]] = {}
+        for i, ex in enumerate(group):
+            key = str((ex.metadata or {}).get("residual_group") or f"ungrouped:{i}")
+            by_group.setdefault(key, []).append(ex)
+        for block in by_group.values():
+            if len(selected) + len(block) <= limit or not selected:
+                selected.extend(block)
+            else:
+                leftovers.extend(block)
+        return selected, leftovers
+
+    per_group = max(1, budget // len(nonempty))
+    selected: List[ConversationExample] = []
+    leftovers: List[ConversationExample] = []
+    for group in nonempty:
+        head, tail = take(group, per_group)
+        selected.extend(head)
+        leftovers.extend(tail)
+    remaining = max(0, budget - len(selected))
+    extra, _ = take(leftovers, remaining)
+    selected.extend(extra)
+    return selected
+
+
 def _select_eval_examples(datasets: Dict[str, List[ConversationExample]], cfg: Dict[str, Any]) -> Dict[str, List[ConversationExample]]:
-    train = [ex for group in datasets.values() for ex in group if ex.split == "train"]
-    val = [ex for group in datasets.values() for ex in group if ex.split == "val"]
+    train_groups = [[ex for ex in group if ex.split == "train"] for group in datasets.values()]
+    val_groups = [[ex for ex in group if ex.split == "val"] for group in datasets.values()]
+    train = _balanced_subsample(train_groups, int(cfg["train_subsample"]))
+    val = _balanced_subsample(val_groups, int(cfg["val_subsample"]))
     test_groups = {
         "ordinary_harmful_benign": [ex for ex in datasets["wild"] if ex.split == "test"],
         "ordinary_multiturn_jailbreak": [ex for ex in datasets["multi"] if ex.split == "test"],
@@ -98,8 +144,8 @@ def _select_eval_examples(datasets: Dict[str, List[ConversationExample]], cfg: D
         "sleeper_ood": [ex for ex in datasets["sleeper"] if ex.is_ood],
     }
     return {
-        "train": subsample_examples(train, int(cfg["train_subsample"])),
-        "val": subsample_examples(val, int(cfg["val_subsample"])),
+        "train": train,
+        "val": val,
         **{k: subsample_examples(v, int(cfg["ood_subsample"] if k == "sleeper_ood" else cfg["test_subsample"])) for k, v in test_groups.items()},
     }
 
@@ -121,7 +167,7 @@ def _rank_features(acts_bad: np.ndarray, acts_clean: np.ndarray, device: torch.d
 
 
 @torch.inference_mode()
-def score_methods(h_seq: torch.Tensor, models: Dict[str, Any], y: torch.Tensor) -> Dict[str, np.ndarray]:
+def score_methods(h_seq: torch.Tensor, models: Dict[str, Any], y: torch.Tensor, examples: List[ConversationExample] | None = None) -> Dict[str, np.ndarray]:
     h_seq = h_seq.float()
     h_last = h_seq[:, -1, :]
     out: Dict[str, np.ndarray] = {}
@@ -144,6 +190,11 @@ def score_methods(h_seq: torch.Tensor, models: Dict[str, Any], y: torch.Tensor) 
     out["bilinear_sae_only"] = s2.detach().cpu().numpy()
     out["linear_sae_trajectory"] = (s1 + traj).detach().cpu().numpy()
     out["bilinear_sae_trajectory"] = (s2 + traj).detach().cpu().numpy()
+    if examples is not None and "ctcr_sae" in models and "ctcr_bad_feats" in models:
+        ctcr, _ = ctcr_scores_for_examples(examples, h_seq, models["ctcr_sae"], models["ctcr_bad_feats"])
+        out["ctcr_residual_bilinear"] = ctcr.detach().cpu().numpy()
+    else:
+        out["ctcr_residual_bilinear"] = np.zeros(h_seq.size(0), dtype=float)
     out["full_fused"] = models["fuser"](s1, s2, traj).detach().cpu().numpy()
     return out
 
@@ -256,6 +307,8 @@ def run_seed(seed: int, cfg: Dict[str, Any], run_dir: Path, datasets: Dict[str, 
     val_y = _targets(selected["val"]).to(device)
 
     linear_sae, bilinear_sae, sae_stats = train_saes(train_h, cfg, subject.hidden_size, run_dir / "checkpoints", seed, logger)
+    ctcr_residuals, ctcr_targets, ctcr_train_rows = build_ctcr_residual_dataset(selected["train"], train_h)
+    ctcr_sae, ctcr_stats = train_ctcr_sae(ctcr_residuals, cfg, subject.hidden_size, run_dir / "checkpoints", seed, logger)
     h_bad = train_h[train_y == 1, -1, :]
     h_clean = train_h[train_y == 0, -1, :]
     with torch.inference_mode():
@@ -263,6 +316,9 @@ def run_seed(seed: int, cfg: Dict[str, Any], run_dir: Path, datasets: Dict[str, 
             "linear": _rank_features(linear_sae.get_sparse_acts(h_bad).cpu().numpy(), linear_sae.get_sparse_acts(h_clean).cpu().numpy(), device),
             "bilinear": _rank_features(bilinear_sae.get_sparse_acts(h_bad).cpu().numpy(), bilinear_sae.get_sparse_acts(h_clean).cpu().numpy(), device),
         }
+        ctcr_bad = ctcr_residuals[ctcr_targets == 1]
+        ctcr_clean = ctcr_residuals[ctcr_targets == 0]
+        ctcr_bad_feats = _rank_features(ctcr_sae.get_sparse_acts(ctcr_bad).cpu().numpy(), ctcr_sae.get_sparse_acts(ctcr_clean).cpu().numpy(), device)
     trajectory, fuser, fuser_stats = train_fuser(train_h, train_y, linear_sae, bilinear_sae, bad_feats, cfg, subject.hidden_size, run_dir / "checkpoints", seed, logger)
 
     dense = DenseLinearProbe()
@@ -300,6 +356,8 @@ def run_seed(seed: int, cfg: Dict[str, Any], run_dir: Path, datasets: Dict[str, 
         "trajectory": trajectory,
         "fuser": fuser,
         "bad_feats": bad_feats,
+        "ctcr_sae": ctcr_sae,
+        "ctcr_bad_feats": ctcr_bad_feats,
     }
 
     metric_rows: List[Dict[str, Any]] = []
@@ -308,6 +366,9 @@ def run_seed(seed: int, cfg: Dict[str, Any], run_dir: Path, datasets: Dict[str, 
     locality_rows = []
     taxonomy_rows: List[Dict[str, Any]] = []
     causal_rows: List[Dict[str, Any]] = []
+    ctcr_rows: List[Dict[str, Any]] = []
+    for row in ctcr_train_rows:
+        ctcr_rows.append({**row, "seed": seed, "eval_slice": "train", "group": "sleeper_distributed_trigger", "method": "ctcr_residual_bilinear"})
     layer_rows = layer_summary_rows(train_h, train_y, seed, intercept_layer, "train")
     ppx = _defended_perplexity(subject, cfg, logger)
 
@@ -317,8 +378,9 @@ def run_seed(seed: int, cfg: Dict[str, Any], run_dir: Path, datasets: Dict[str, 
         eval_h, _ = extract_hidden_trajectories(subject, examples, cfg, intercept_layer, logger)
         eval_h = eval_h.to(device).float()
         eval_y = _targets(examples).to(device)
-        scores = score_methods(eval_h, model_bundle, eval_y)
+        scores = score_methods(eval_h, model_bundle, eval_y, examples)
         taxonomy_rows.extend(mechanistic_taxonomy_rows(examples, scores, seed, group))
+        ctcr_rows.extend(ctcr_analysis_rows(examples, eval_h, ctcr_sae, ctcr_bad_feats, seed, group))
         causal_rows.extend(causal_intervention_rows(examples, eval_h, linear_sae, bilinear_sae, bad_feats, seed, group))
         layer_rows.extend(layer_summary_rows(eval_h, eval_y, seed, intercept_layer, group))
         base_responses, tok_sec = generate_responses(subject, examples, cfg, logger)
@@ -356,7 +418,7 @@ def run_seed(seed: int, cfg: Dict[str, Any], run_dir: Path, datasets: Dict[str, 
                     rows.append(row)
                     raw_rows.append(row)
                 metrics = compute_metrics(rows, base_asr=base_asr)
-                metrics.update({"seed": seed, "group": rows[0]["group"], "eval_slice": group, "method": method, "threshold": float(threshold), "threshold_label": _threshold_label(float(threshold)), "defended_perplexity": ppx, "tokens_sec": tok_sec, **sae_stats, **fuser_stats})
+                metrics.update({"seed": seed, "group": rows[0]["group"], "eval_slice": group, "method": method, "threshold": float(threshold), "threshold_label": _threshold_label(float(threshold)), "defended_perplexity": ppx, "tokens_sec": tok_sec, **sae_stats, **ctcr_stats, **fuser_stats})
                 metrics["in_family_asr_reduction"] = metrics["asr_reduction"] if group == "sleeper_distributed_trigger" else 0.0
                 metric_rows.append(metrics)
                 clean_flags = [flag for ex, flag in zip(examples, intervened) if ex.target == 0]
@@ -376,7 +438,7 @@ def run_seed(seed: int, cfg: Dict[str, Any], run_dir: Path, datasets: Dict[str, 
     conjunction_rows = conjunction_control_rows(taxonomy_rows)
     null_rows = null_control_rows(taxonomy_rows, seed)
     transfer_summary_rows = transfer_rows(taxonomy_rows)
-    return metric_rows, feature_rows, locality_rows, taxonomy_rows, conjunction_rows, causal_rows, null_rows, transfer_summary_rows, layer_rows
+    return metric_rows, feature_rows, locality_rows, taxonomy_rows, conjunction_rows, causal_rows, null_rows, transfer_summary_rows, layer_rows, ctcr_rows
 
 
 def main() -> None:
@@ -418,9 +480,10 @@ def main() -> None:
     all_null: List[Dict[str, Any]] = []
     all_transfer: List[Dict[str, Any]] = []
     all_layers: List[Dict[str, Any]] = []
+    all_ctcr: List[Dict[str, Any]] = []
     for seed in cfg["eval"]["seeds"]:
         logger.info("Starting seed %s", seed)
-        rows, feats, locality, taxonomy, conjunction, causal, nulls, transfer, layers = run_seed(int(seed), cfg, run_dir, datasets, judge, logger)
+        rows, feats, locality, taxonomy, conjunction, causal, nulls, transfer, layers, ctcr = run_seed(int(seed), cfg, run_dir, datasets, judge, logger)
         all_metrics.extend(rows)
         all_features.extend(feats)
         all_locality.extend(locality)
@@ -430,6 +493,7 @@ def main() -> None:
         all_null.extend(nulls)
         all_transfer.extend(transfer)
         all_layers.extend(layers)
+        all_ctcr.extend(ctcr)
 
     metrics_df = pd.DataFrame(all_metrics)
     feature_df = pd.DataFrame(all_features)
@@ -440,6 +504,7 @@ def main() -> None:
     null_df = pd.DataFrame(all_null)
     transfer_df = pd.DataFrame(all_transfer)
     layer_df = pd.DataFrame(all_layers)
+    ctcr_df = pd.DataFrame(all_ctcr)
     sig_df = pd.DataFrame(significance_rows(all_metrics))
     dataset_df = pd.DataFrame(dataset_summary)
     config_df = pd.DataFrame([{"key": k, "value": str(v)} for k, v in cfg.items()])
@@ -453,6 +518,7 @@ def main() -> None:
     null_df.to_csv(run_dir / "raw_metrics" / "null_controls.csv", index=False)
     transfer_df.to_csv(run_dir / "raw_metrics" / "transfer_results.csv", index=False)
     layer_df.to_csv(run_dir / "raw_metrics" / "layer_summary.csv", index=False)
+    ctcr_df.to_csv(run_dir / "raw_metrics" / "ctcr_residuals.csv", index=False)
     export_tables(metrics_df, sig_df, dataset_df, config_df, run_dir / "tables")
     make_main_figures(metrics_df, feature_df, run_dir / "figures")
     make_appendix_figures(metrics_df, feature_df, locality_df, run_dir / "figures")
