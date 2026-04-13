@@ -115,13 +115,13 @@ ARF-SAE creates compact matched residual datasets for:
 - ordinary multi-turn drift
 - sleeper-style sequence triggers
 
-For each family, the attack prompt is compared against one or more matched controls. Sleeper-style examples use temporal controls such as reverse order, same-turn compression, reset, semantic decoys, long-gap context, and neutral filler. The method trains a small sparse autoencoder on:
+For each family, the attack prompt is derived from the loaded public prompt pools where possible, then compared against one or more matched controls. The ARF builder excludes the constructed sleeper dataset from its base prompt pool to avoid synthetic-on-synthetic provenance. The saved metadata includes base dataset, base example id, source split, tactic/category fields where available, and the transformation type. Sleeper-style examples use temporal controls such as reverse order, same-turn compression, reset, semantic decoys, long-gap context, and neutral filler. The method trains a small sparse autoencoder on:
 
 ```text
 attack hidden state - mean(matched control hidden states)
 ```
 
-and then trains a lightweight classifier over the sparse residual activations. This adds one compact hidden-state extraction pass per seed but no extra generation or Gemma judge calls.
+and then trains a lightweight classifier over the sparse residual activations. The pipeline also exports a bag-of-words lexical baseline so the paper can check whether attack-family classification is merely recoverable from surface wording. This adds one compact hidden-state extraction pass per seed but no extra generation or Gemma judge calls.
 
 ## Repository Layout
 
@@ -386,7 +386,7 @@ Important files:
 
 Figures are saved as both PDF and PNG where applicable.
 
-The `synthetic_datasets/` directory is intended for paper/letter artifacts. It stores the exact constructed sleeper examples, ARF attack/control prompts, split labels, matched-control metadata, and robustness summaries used in the run.
+The `synthetic_datasets/` directory is intended for paper/letter artifacts. It stores the exact constructed sleeper examples, ARF attack/control prompts, split labels, matched-control metadata, real-source provenance for prompt-derived transformations, and robustness summaries used in the run.
 
 ## Main Experiments
 

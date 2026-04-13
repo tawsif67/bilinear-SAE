@@ -34,7 +34,7 @@ from eval.significance import significance_rows
 from eval.transfer import transfer_rows
 from models.baselines import ActivationProbe, DenseLinearProbe, mean_difference_vector, top_mean_difference_dims
 from models.baselines import TorchMLPProbe
-from models.arf import extract_attack_residuals, fingerprint_metric_rows, sparse_features_for_residuals
+from models.arf import extract_attack_residuals, fingerprint_metric_rows, lexical_baseline_rows, sparse_features_for_residuals
 from models.ctcr import build_ctcr_residual_dataset, ctcr_analysis_rows, ctcr_scores_for_examples
 from models.subject import SubjectModel, require_full_experiment_device
 from train.train_ctcr import train_ctcr_sae
@@ -74,6 +74,24 @@ def _last_user_text(ex: ConversationExample) -> str:
             if text:
                 return text
     return normalize_text(ex.prompt_text)
+
+
+def _base_prompt_record(ex: ConversationExample) -> Dict[str, Any]:
+    meta = ex.metadata or {}
+    return {
+        "text": _last_user_text(ex),
+        "base_source": ex.source,
+        "base_example_id": ex.id,
+        "base_group": ex.group,
+        "base_family": ex.family,
+        "base_mode": ex.mode,
+        "base_target": ex.target,
+        "base_data_type": meta.get("data_type", ""),
+        "base_tactics": meta.get("tactics", ""),
+        "base_row_id": meta.get("row_id", ""),
+        "base_source_split": meta.get("source_split", ""),
+        "base_goal_id": meta.get("goal_id", ""),
+    }
 
 
 def _write_synthetic_dataset_artifacts(run_dir: Path, name: str, rows: List[Dict[str, Any]], summary: Dict[str, Any]) -> None:
@@ -132,6 +150,8 @@ def _arf_synthetic_summary(pairs) -> Dict[str, Any]:
     split_counts = Counter(pair.split for pair in pairs)
     control_counts = Counter(len(pair.control_prompts) for pair in pairs)
     residual_types = Counter(str(pair.metadata.get("residual_type", "")) for pair in pairs)
+    constructions = Counter(str(pair.metadata.get("construction", "")) for pair in pairs)
+    base_sources = Counter(str((pair.metadata.get("base_harmful") or {}).get("base_source", "")) for pair in pairs)
     return {
         "source": "constructed_attack_residual_fingerprints",
         "n_pairs": len(pairs),
@@ -139,13 +159,18 @@ def _arf_synthetic_summary(pairs) -> Dict[str, Any]:
         "split_counts": dict(split_counts),
         "control_count_distribution": dict(control_counts),
         "residual_type_counts": dict(residual_types),
+        "construction_counts": dict(constructions),
+        "base_harmful_source_counts": dict(base_sources),
         "robustness_design": [
-            "matched attack/control prompts per family",
+            "matched attack/control prompts per family derived from real loaded prompt pools when available",
+            "constructed_sleeper examples are excluded from ARF base prompt pools to avoid synthetic-on-synthetic provenance",
+            "base_source/base_example_id/base_tactic provenance is saved in each pair metadata",
             "multiple template variants for roleplay, policy override, and refusal suppression",
             "obfuscation controls separate decode pressure from harmful compliance",
             "sleeper sequence pairs include reverse, same-turn, decoy, reset, and long-gap controls",
             "deterministic generation from seed and saved source_index metadata",
             "compact residuals are computed as attack hidden state minus mean matched control hidden state",
+            "bag-of-words lexical baseline is exported to test whether attack family is trivially recoverable from surface text",
         ],
     }
 
@@ -384,8 +409,9 @@ def _run_attack_fingerprints(
     if not bool(cfg.get("attack_fingerprints", {}).get("enabled", True)):
         return [], []
     train_examples = selected.get("train", [])
-    benign_pool = [_last_user_text(ex) for ex in train_examples if ex.source_is_benign or ex.target == 0]
-    harmful_pool = [_last_user_text(ex) for ex in train_examples if ex.target == 1]
+    public_train_examples = [ex for ex in train_examples if ex.source != "constructed_sleeper"]
+    benign_pool = [_base_prompt_record(ex) for ex in public_train_examples if (ex.source_is_benign or ex.target == 0) and _last_user_text(ex)]
+    harmful_pool = [_base_prompt_record(ex) for ex in public_train_examples if ex.target == 1 and _last_user_text(ex)]
     pairs = build_attack_fingerprint_pairs(cfg, seed, benign_pool, harmful_pool)
     if not pairs:
         return [], []
@@ -402,6 +428,7 @@ def _run_attack_fingerprints(
     train_resid = train_resid.to(subject.device).float()
     arf_sae, arf_clf, arf_stats = train_arf_sae_classifier(train_resid, train_labels, cfg, subject.hidden_size, run_dir / "checkpoints", seed, logger)
     rows: List[Dict[str, Any]] = []
+    lexical_rows: List[Dict[str, Any]] = []
     raw_rows: List[Dict[str, Any]] = [{**row, "seed": seed} for row in train_raw]
     for split, split_pairs in [("train", train_pairs), ("val", val_pairs), ("test", test_pairs)]:
         if split == "train":
@@ -413,13 +440,15 @@ def _run_attack_fingerprints(
         x = sparse_features_for_residuals(arf_sae, resid)
         for row in fingerprint_metric_rows(arf_clf, x, labels, split, seed):
             row.update(arf_stats)
+            row["method"] = "arf_sae"
             rows.append(row)
+        lexical_rows.extend(lexical_baseline_rows(train_pairs, split_pairs, split, seed, int(cfg.get("attack_fingerprints", {}).get("lexical_max_features", 2048))))
         if split != "train":
             del resid
             clear_cuda_cache(subject.device)
     del train_resid
     clear_cuda_cache(subject.device)
-    return rows, raw_rows
+    return rows + [{**row, "family": "all", "arf_mse": 0.0, "arf_l1": 0.0, "method": "lexical_baseline"} for row in lexical_rows], raw_rows
 
 
 def run_seed(seed: int, cfg: Dict[str, Any], run_dir: Path, datasets: Dict[str, List[ConversationExample]], judge, logger):

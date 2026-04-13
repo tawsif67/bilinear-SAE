@@ -42,6 +42,7 @@ attack_fingerprints:
   k_sparse: 32
   steps: 80
   batch_size: 16
+  lexical_max_features: 1024
   lr: 3e-4
   l1_coeff: 0.001
   families: [direct_harmful, roleplay_persona, policy_override, obfuscation, refusal_suppression, ordinary_multiturn_drift, sleeper_sequence]

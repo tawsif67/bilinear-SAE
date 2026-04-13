@@ -6,9 +6,11 @@ from typing import Any, Dict, List, Sequence, Tuple
 import numpy as np
 import torch
 try:
+    from sklearn.feature_extraction.text import CountVectorizer
     from sklearn.linear_model import LogisticRegression
     from sklearn.metrics import accuracy_score, f1_score
 except ImportError:
+    CountVectorizer = None
     LogisticRegression = None
     accuracy_score = None
     f1_score = None
@@ -141,3 +143,52 @@ def fingerprint_metric_rows(
             "n": int(mask.sum()),
         })
     return rows
+
+
+def lexical_baseline_rows(
+    train_pairs: Sequence[AttackFingerprintPair],
+    eval_pairs: Sequence[AttackFingerprintPair],
+    split: str,
+    seed: int,
+    max_features: int = 2048,
+) -> List[Dict[str, Any]]:
+    if not train_pairs or not eval_pairs:
+        return []
+    families = sorted({pair.family for pair in train_pairs})
+    label_to_id = {name: i for i, name in enumerate(families)}
+    train_text = [pair.attack_prompt for pair in train_pairs]
+    eval_text = [pair.attack_prompt for pair in eval_pairs]
+    y_train = np.array([label_to_id[pair.family] for pair in train_pairs], dtype=int)
+    y_eval = np.array([label_to_id.get(pair.family, -1) for pair in eval_pairs], dtype=int)
+    valid = y_eval >= 0
+    if not np.any(valid):
+        return []
+    if CountVectorizer is not None and LogisticRegression is not None and len(np.unique(y_train)) > 1:
+        vec = CountVectorizer(max_features=max_features, ngram_range=(1, 2), min_df=1)
+        x_train = vec.fit_transform(train_text)
+        x_eval = vec.transform(eval_text)
+        clf = LogisticRegression(max_iter=1000, solver="lbfgs")
+        clf.fit(x_train, y_train)
+        pred = clf.predict(x_eval)[valid]
+    else:
+        centroids = {}
+        for family, idx in label_to_id.items():
+            tokens = set(" ".join(pair.attack_prompt.lower() for pair in train_pairs if pair.family == family).split())
+            centroids[idx] = tokens
+        pred = []
+        for text in eval_text:
+            tokens = set(text.lower().split())
+            scores = {idx: len(tokens & vocab) for idx, vocab in centroids.items()}
+            pred.append(max(scores, key=scores.get))
+        pred = np.array(pred, dtype=int)[valid]
+    y_valid = y_eval[valid]
+    acc = float(accuracy_score(y_valid, pred)) if accuracy_score is not None else float((pred == y_valid).mean())
+    macro_f1 = float(f1_score(y_valid, pred, average="macro")) if f1_score is not None else acc
+    return [{
+        "seed": seed,
+        "split": split,
+        "baseline": "bag_of_words_attack_prompt",
+        "accuracy": acc,
+        "macro_f1": macro_f1,
+        "n": int(len(y_valid)),
+    }]

@@ -30,7 +30,7 @@ def _require_arf(arf: pd.DataFrame, pairs: pd.DataFrame) -> None:
 
 def figure_arf_accuracy(arf: pd.DataFrame, out_dir: Path) -> None:
     setup_style()
-    data = arf[(arf["family"] != "all") & (arf["split"].isin(["val", "test"]))]
+    data = arf[(arf.get("method", "arf_sae") == "arf_sae") & (arf["family"] != "all") & (arf["split"].isin(["val", "test"]))]
     fig, ax = plt.subplots(figsize=(12.5, 5.4))
     sns.barplot(data=data, x="family", y="accuracy", hue="split", order=FAMILY_ORDER, ax=ax, errorbar=("ci", 95))
     ax.set_title("ARF-SAE attack-family accuracy")
@@ -43,9 +43,9 @@ def figure_arf_accuracy(arf: pd.DataFrame, out_dir: Path) -> None:
 
 def figure_arf_confusion_proxy(arf: pd.DataFrame, out_dir: Path) -> None:
     setup_style()
-    data = arf[(arf["family"] != "all") & (arf["split"] == "test")]
+    data = arf[(arf.get("method", "arf_sae") == "arf_sae") & (arf["family"] != "all") & (arf["split"] == "test")]
     if data.empty:
-        data = arf[arf["family"] != "all"]
+        data = arf[(arf.get("method", "arf_sae") == "arf_sae") & (arf["family"] != "all")]
     pivot = data.pivot_table(index="family", columns="split", values="accuracy", aggfunc="mean").reindex(FAMILY_ORDER)
     fig, ax = plt.subplots(figsize=(7.5, 6.8))
     sns.heatmap(pivot, annot=True, fmt=".2f", cmap="viridis", vmin=0, vmax=1, linewidths=0.5, ax=ax)
@@ -84,8 +84,11 @@ def figure_arf_generalization(arf: pd.DataFrame, out_dir: Path) -> None:
     setup_style()
     data = arf[arf["family"] == "all"].copy()
     fig, ax = plt.subplots(figsize=(8.2, 5.2))
-    melted = data.melt(id_vars=["seed", "split"], value_vars=["accuracy", "macro_f1"], var_name="metric", value_name="value")
-    sns.lineplot(data=melted, x="split", y="value", hue="metric", marker="o", linewidth=2.2, ax=ax, errorbar=("ci", 95))
+    if "method" not in data.columns:
+        data["method"] = "arf_sae"
+    melted = data.melt(id_vars=["seed", "split", "method"], value_vars=["accuracy", "macro_f1"], var_name="metric", value_name="value")
+    melted["series"] = melted["method"] + ":" + melted["metric"]
+    sns.lineplot(data=melted, x="split", y="value", hue="series", marker="o", linewidth=2.2, ax=ax, errorbar=("ci", 95))
     ax.set_title("ARF-SAE split generalization")
     ax.set_xlabel("Split")
     ax.set_ylabel("Score")
