@@ -1,10 +1,10 @@
-# CTCR-SAE: Cross-Turn Conjunction Residuals for Sleeper-Style Jailbreaks
+# CTCR-SAE + ARF-SAE: Residual Fingerprints for Jailbreak Mechanisms
 
 This repository contains a modular research pipeline for testing the claim:
 
 > We identify cross-turn conjunctions as a distinct internal mechanism of sleeper-style jailbreaks. Unlike ordinary multi-turn jailbreaks, which produce smooth representational drift, sleeper triggers can remain weakly detectable until multiple latent conditions are jointly present. We isolate this mechanism with a Cross-Turn Conjunction Residual, `h(A+B)-h(A)-h(B)+h(0)`, and sparse-code that residual with bilinear features for detection and localized intervention.
 
-The code is organized as a reproducible experiment stack rather than a single prototype script. It builds public-data and constructed-data benchmark groups, trains a LoRA-adapted subject model, extracts hidden-state trajectories, trains sparse autoencoders, computes CTCR residuals from matched sleeper controls, evaluates trajectory and sparse-feature baselines, runs mechanistic conjunction diagnostics, and exports paper-style metrics, figures, and LaTeX tables.
+The code is organized as a reproducible experiment stack rather than a single prototype script. It builds public-data and constructed-data benchmark groups, trains a LoRA-adapted subject model, extracts hidden-state trajectories, trains sparse autoencoders, computes CTCR residuals from matched sleeper controls, evaluates attack residual fingerprints across jailbreak families, runs mechanistic diagnostics, and exports paper-style metrics, figures, and LaTeX tables.
 
 ## Core Idea: CTCR
 
@@ -37,6 +37,8 @@ The pipeline compares thirteen methods:
 13. Full fused method using linear sparse score, bilinear sparse score, trajectory score, and pairwise interactions
 
 The main question is whether sleeper-style attacks produce sparse **conjunction residuals** that ordinary trajectory and linear sparse methods miss.
+
+The repository also includes **Attack Residual Fingerprinting (ARF-SAE)**. ARF-SAE builds matched attack/control prompts for multiple jailbreak families, computes a family-specific residual for each pair, trains a compact sparse autoencoder on those residuals, and classifies the residual fingerprint. This broadens the question from "can we detect sleeper triggers?" to "do different jailbreak mechanisms leave distinguishable internal fingerprints?"
 
 ## Fixed Model Choices
 
@@ -88,10 +90,38 @@ The pipeline keeps real public data separate from constructed sleeper-trigger da
   - only condition A
   - only condition B
   - neither condition
+  - reverse order
+  - same-turn compression
+  - delayed gap
+  - interruption
+  - reset
+  - semantic decoy-A
+  - semantic decoy-B
+  - long-gap carry
   - shuffled turns
   - single-turn compressed controls
 
-Each sleeper block stores a stable `residual_group` so `A+B`, `A`, `B`, and `0` controls remain together across deterministic splits. This is what makes CTCR computation possible without leakage. The constructed sleeper data uses redacted/proxy unsafe-compliance labels and does not generate actionable harmful completions.
+Each sleeper block stores a stable `residual_group` so `A+B`, `A`, `B`, `0`, and temporal sequence controls remain together across deterministic splits. This is what makes CTCR and sequence-control analysis possible without leakage. The constructed sleeper data uses redacted/proxy unsafe-compliance labels and does not generate actionable harmful completions.
+
+## Attack Residual Fingerprinting
+
+ARF-SAE creates compact matched residual datasets for:
+
+- direct harmful requests
+- roleplay/persona jailbreaks
+- fake-authority or policy-override jailbreaks
+- encoding/obfuscation jailbreaks
+- refusal-suppression jailbreaks
+- ordinary multi-turn drift
+- sleeper-style sequence triggers
+
+For each family, the attack prompt is compared against one or more matched controls. Sleeper-style examples use temporal controls such as reverse order, same-turn compression, reset, semantic decoys, long-gap context, and neutral filler. The method trains a small sparse autoencoder on:
+
+```text
+attack hidden state - mean(matched control hidden states)
+```
+
+and then trains a lightweight classifier over the sparse residual activations. This adds one compact hidden-state extraction pass per seed but no extra generation or Gemma judge calls.
 
 ## Repository Layout
 
@@ -107,6 +137,7 @@ Each sleeper block stores a stable `residual_group` so `A+B`, `A`, `B`, and `0` 
     wildjailbreak.py
     multiturn_jailbreak.py
     sleeper_builder.py
+    attack_fingerprints.py
     splits.py
   models/
     subject.py
@@ -116,10 +147,12 @@ Each sleeper block stores a stable `residual_group` so `A+B`, `A`, `B`, and `0` 
     fusion.py
     interventions.py
     ctcr.py
+    arf.py
   train/
     train_lora.py
     train_sae.py
     train_ctcr.py
+    train_arf.py
     train_fuser.py
   eval/
     judge.py
@@ -283,6 +316,7 @@ Raw per-threshold outputs are streamed to JSONL without repeated response text. 
 - smaller subsamples: `1000 / 200 / 300 / 240`
 - one seed
 - shorter SAE/fuser training: `200 / 200` steps
+- ARF-SAE: `12` pairs per attack family, `80` SAE steps
 - eval/judge batch sizes: `4 / 2`
 - intended for integration testing
 
@@ -292,6 +326,7 @@ Raw per-threshold outputs are streamed to JSONL without repeated response text. 
 - judge model: `google/gemma-3-4b-it`
 - train/val/test/OOD subsampling: `4500 / 800 / 1200 / 900`
 - seeds: `[42, 123, 456]`
+- ARF-SAE: `48` pairs per attack family, `300` SAE steps
 - LoRA, SAE, trajectory, fuser, and evaluation settings
 
 ## Outputs
@@ -319,12 +354,15 @@ Important files:
 - `raw_metrics/mechanistic_taxonomy.csv`
 - `raw_metrics/conjunction_controls.csv`
 - `raw_metrics/ctcr_residuals.csv`
+- `raw_metrics/attack_residual_fingerprints.csv`
+- `raw_metrics/attack_residual_pairs.csv`
 - `raw_metrics/causal_interventions.csv`
 - `raw_metrics/null_controls.csv`
 - `raw_metrics/transfer_results.csv`
 - `raw_metrics/layer_summary.csv`
 - `tables/main_results.csv`
 - `tables/significance.csv`
+- `tables/attack_residual_fingerprints.csv`
 - `tables/dataset_summary.csv`
 - `tables/config_summary.csv`
 - `tables/table_main_results.tex`

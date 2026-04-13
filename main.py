@@ -15,7 +15,8 @@ try:
 except ImportError:
     LogisticRegression = None
 
-from data.loaders import ConversationExample, subsample_examples
+from data.attack_fingerprints import build_attack_fingerprint_pairs
+from data.loaders import ConversationExample, normalize_text, subsample_examples
 from data.multiturn_jailbreak import load_multiturn_jailbreak
 from data.sleeper_builder import build_sleeper_dataset
 from data.splits import apply_split_labels, deterministic_group_split, deterministic_split, save_splits
@@ -32,9 +33,11 @@ from eval.significance import significance_rows
 from eval.transfer import transfer_rows
 from models.baselines import ActivationProbe, DenseLinearProbe, mean_difference_vector, top_mean_difference_dims
 from models.baselines import TorchMLPProbe
+from models.arf import extract_attack_residuals, fingerprint_metric_rows, sparse_features_for_residuals
 from models.ctcr import build_ctcr_residual_dataset, ctcr_analysis_rows, ctcr_scores_for_examples
 from models.subject import SubjectModel, require_full_experiment_device
 from train.train_ctcr import train_ctcr_sae
+from train.train_arf import train_arf_sae_classifier
 from train.train_fuser import train_fuser
 from train.train_lora import train_lora
 from train.train_sae import train_saes
@@ -61,6 +64,15 @@ METHODS = [
     "ctcr_residual_bilinear",
     "full_fused",
 ]
+
+
+def _last_user_text(ex: ConversationExample) -> str:
+    for turn in reversed(ex.turns):
+        if turn.get("role") == "user":
+            text = normalize_text(turn.get("content", ""))
+            if text:
+                return text
+    return normalize_text(ex.prompt_text)
 
 
 def _targets(examples: List[ConversationExample]) -> torch.Tensor:
@@ -279,6 +291,50 @@ def _feature_rows(seed: int, linear_sae, bilinear_sae, h_seq: torch.Tensor, y: t
     return rows
 
 
+def _run_attack_fingerprints(
+    subject,
+    cfg: Dict[str, Any],
+    selected: Dict[str, List[ConversationExample]],
+    intercept_layer: int,
+    seed: int,
+    run_dir: Path,
+    logger,
+) -> tuple[List[Dict[str, Any]], List[Dict[str, Any]]]:
+    if not bool(cfg.get("attack_fingerprints", {}).get("enabled", True)):
+        return [], []
+    train_examples = selected.get("train", [])
+    benign_pool = [_last_user_text(ex) for ex in train_examples if ex.source_is_benign or ex.target == 0]
+    harmful_pool = [_last_user_text(ex) for ex in train_examples if ex.target == 1]
+    pairs = build_attack_fingerprint_pairs(cfg, seed, benign_pool, harmful_pool)
+    if not pairs:
+        return [], []
+    train_pairs = [pair for pair in pairs if pair.split == "train"]
+    val_pairs = [pair for pair in pairs if pair.split == "val"]
+    test_pairs = [pair for pair in pairs if pair.split == "test"]
+    train_resid, train_labels, train_raw = extract_attack_residuals(subject, train_pairs, cfg, intercept_layer, logger)
+    train_resid = train_resid.to(subject.device).float()
+    arf_sae, arf_clf, arf_stats = train_arf_sae_classifier(train_resid, train_labels, cfg, subject.hidden_size, run_dir / "checkpoints", seed, logger)
+    rows: List[Dict[str, Any]] = []
+    raw_rows: List[Dict[str, Any]] = [{**row, "seed": seed} for row in train_raw]
+    for split, split_pairs in [("train", train_pairs), ("val", val_pairs), ("test", test_pairs)]:
+        if split == "train":
+            resid, labels = train_resid, train_labels
+        else:
+            resid, labels, raw = extract_attack_residuals(subject, split_pairs, cfg, intercept_layer, logger)
+            resid = resid.to(subject.device).float()
+            raw_rows.extend({**row, "seed": seed} for row in raw)
+        x = sparse_features_for_residuals(arf_sae, resid)
+        for row in fingerprint_metric_rows(arf_clf, x, labels, split, seed):
+            row.update(arf_stats)
+            rows.append(row)
+        if split != "train":
+            del resid
+            clear_cuda_cache(subject.device)
+    del train_resid
+    clear_cuda_cache(subject.device)
+    return rows, raw_rows
+
+
 def run_seed(seed: int, cfg: Dict[str, Any], run_dir: Path, datasets: Dict[str, List[ConversationExample]], judge, logger):
     set_seed(seed)
     selected = _select_eval_examples(datasets, cfg)
@@ -367,6 +423,7 @@ def run_seed(seed: int, cfg: Dict[str, Any], run_dir: Path, datasets: Dict[str, 
     for row in ctcr_train_rows:
         ctcr_rows.append({**row, "seed": seed, "eval_slice": "train", "group": "sleeper_distributed_trigger", "method": "ctcr_residual_bilinear"})
     layer_rows = layer_summary_rows(train_h, train_y, seed, intercept_layer, "train")
+    arf_rows, arf_raw_rows = _run_attack_fingerprints(subject, cfg, selected, intercept_layer, seed, run_dir, logger)
     ppx = _defended_perplexity(subject, cfg, logger)
 
     for group, examples in selected.items():
@@ -455,7 +512,7 @@ def run_seed(seed: int, cfg: Dict[str, Any], run_dir: Path, datasets: Dict[str, 
     conjunction_rows = conjunction_control_rows(taxonomy_rows)
     null_rows = null_control_rows(taxonomy_rows, seed)
     transfer_summary_rows = transfer_rows(taxonomy_rows)
-    return metric_rows, feature_rows, locality_rows, taxonomy_rows, conjunction_rows, causal_rows, null_rows, transfer_summary_rows, layer_rows, ctcr_rows
+    return metric_rows, feature_rows, locality_rows, taxonomy_rows, conjunction_rows, causal_rows, null_rows, transfer_summary_rows, layer_rows, ctcr_rows, arf_rows, arf_raw_rows
 
 
 def main() -> None:
@@ -498,9 +555,11 @@ def main() -> None:
     all_transfer: List[Dict[str, Any]] = []
     all_layers: List[Dict[str, Any]] = []
     all_ctcr: List[Dict[str, Any]] = []
+    all_arf: List[Dict[str, Any]] = []
+    all_arf_raw: List[Dict[str, Any]] = []
     for seed in cfg["eval"]["seeds"]:
         logger.info("Starting seed %s", seed)
-        rows, feats, locality, taxonomy, conjunction, causal, nulls, transfer, layers, ctcr = run_seed(int(seed), cfg, run_dir, datasets, judge, logger)
+        rows, feats, locality, taxonomy, conjunction, causal, nulls, transfer, layers, ctcr, arf, arf_raw = run_seed(int(seed), cfg, run_dir, datasets, judge, logger)
         all_metrics.extend(rows)
         all_features.extend(feats)
         all_locality.extend(locality)
@@ -511,6 +570,8 @@ def main() -> None:
         all_transfer.extend(transfer)
         all_layers.extend(layers)
         all_ctcr.extend(ctcr)
+        all_arf.extend(arf)
+        all_arf_raw.extend(arf_raw)
 
     metrics_df = pd.DataFrame(all_metrics)
     feature_df = pd.DataFrame(all_features)
@@ -522,6 +583,8 @@ def main() -> None:
     transfer_df = pd.DataFrame(all_transfer)
     layer_df = pd.DataFrame(all_layers)
     ctcr_df = pd.DataFrame(all_ctcr)
+    arf_df = pd.DataFrame(all_arf)
+    arf_raw_df = pd.DataFrame(all_arf_raw)
     sig_df = pd.DataFrame(significance_rows(all_metrics))
     dataset_df = pd.DataFrame(dataset_summary)
     config_df = pd.DataFrame([{"key": k, "value": str(v)} for k, v in cfg.items()])
@@ -536,7 +599,10 @@ def main() -> None:
     transfer_df.to_csv(run_dir / "raw_metrics" / "transfer_results.csv", index=False)
     layer_df.to_csv(run_dir / "raw_metrics" / "layer_summary.csv", index=False)
     ctcr_df.to_csv(run_dir / "raw_metrics" / "ctcr_residuals.csv", index=False)
+    arf_df.to_csv(run_dir / "raw_metrics" / "attack_residual_fingerprints.csv", index=False)
+    arf_raw_df.to_csv(run_dir / "raw_metrics" / "attack_residual_pairs.csv", index=False)
     export_tables(metrics_df, sig_df, dataset_df, config_df, run_dir / "tables")
+    arf_df.to_csv(run_dir / "tables" / "attack_residual_fingerprints.csv", index=False)
     make_main_figures(metrics_df, feature_df, run_dir / "figures")
     make_appendix_figures(metrics_df, feature_df, locality_df, run_dir / "figures")
     make_mechanistic_claim_figures(taxonomy_df, conjunction_df, causal_df, run_dir / "figures")
