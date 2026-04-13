@@ -4,10 +4,10 @@ multiturn_dataset: ScaleAI/mhj
 echo_chamber_dataset: null
 max_seq_len: 384
 intercept_layers: [-4]
-train_subsample: 1500
-val_subsample: 300
-test_subsample: 500
-ood_subsample: 400
+train_subsample: 1000
+val_subsample: 200
+test_subsample: 300
+ood_subsample: 240
 output_root: outputs
 require_gpu: false
 lora:
@@ -23,8 +23,8 @@ sae:
   l1_coeff: 0.001
   bilinear_rank: 64
   bilinear_l2_coeff: 0.0001
-  steps: 250
-  batch_size: 64
+  steps: 200
+  batch_size: 32
   lr: 3e-4
 trajectory_encoder:
   heads: 4
@@ -32,23 +32,23 @@ trajectory_encoder:
   dropout: 0.1
 fuser:
   hidden_dim: 32
-  steps: 250
-  batch_size: 64
+  steps: 200
+  batch_size: 32
   lr: 3e-4
 baselines:
   mlp_hidden_dim: 128
   mlp_steps: 100
   mlp_lr: 1e-3
 eval:
-  batch_size: 8
-  judge_batch_size: 4
+  batch_size: 4
+  judge_batch_size: 2
   max_new_tokens: 32
   thresholds: [inf, 0.90, 0.75, 0.60, 0.45, 0.30, 0.20, 0.10, 0.05]
   seeds: [42]
   human_eval_samples: 32
 data:
-  sleeper_per_family: 90
-  sleeper_ood_per_family: 45
-  wikitext_batches: 4
+  sleeper_per_family: 60
+  sleeper_ood_per_family: 30
+  wikitext_batches: 2
 memory:
   auto_tune: true

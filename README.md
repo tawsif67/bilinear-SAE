@@ -265,20 +265,32 @@ huggingface-cli login
 python main.py --config configs/default.yaml
 ```
 
+The default config is intentionally scaled for safer single-GPU runs rather than maximum sample count:
+
+- train/val/test/OOD subsamples: `4500 / 800 / 1200 / 900`
+- eval batch size: `4`
+- judge batch size: `2`
+- sleeper examples per family: `240`
+- sleeper OOD examples per family: `120`
+- SAE/fuser steps: `1200 / 800`
+
+Raw per-threshold outputs are streamed to JSONL without repeated response text. Qualitative prompt/response text is kept separately under `human_eval_samples/`, which avoids host-RAM blowups during postprocessing.
+
 ## Configs
 
 `configs/debug.yaml`:
 
-- smaller subsamples
+- smaller subsamples: `1000 / 200 / 300 / 240`
 - one seed
-- shorter SAE/fuser training
+- shorter SAE/fuser training: `200 / 200` steps
+- eval/judge batch sizes: `4 / 2`
 - intended for integration testing
 
 `configs/default.yaml`:
 
 - subject model: `Qwen/Qwen2.5-3B-Instruct`
 - judge model: `google/gemma-3-4b-it`
-- train/val/test/OOD subsampling for larger runs
+- train/val/test/OOD subsampling: `4500 / 800 / 1200 / 900`
 - seeds: `[42, 123, 456]`
 - LoRA, SAE, trajectory, fuser, and evaluation settings
 
