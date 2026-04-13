@@ -75,6 +75,19 @@ The pipeline keeps real public data separate from constructed sleeper-trigger da
   - `ScaleAI/mhj` is used as the public multi-turn substitute.
   - The loader reads the relevant MHJ conversation CSV directly because the Hugging Face auto-builder can mix incompatible files from the dataset repo.
 
+### Large Real Harmful Source Pool
+
+- Default source: [`mvrcii/safety-harmful`](https://huggingface.co/datasets/mvrcii/safety-harmful)
+- Default full cap: `12000` records
+- Debug cap: `1500` records
+- Use:
+  - source pool for ARF counterfactual transformations
+  - real prompt provenance for direct, roleplay, policy override, obfuscation, refusal suppression, and sleeper-sequence wrappers
+- Notes:
+  - This harmful-only corpus is **not** merged directly into the main harmful/benign benchmark metrics.
+  - The code saves the selected source pool and summary under `synthetic_datasets/`.
+  - ARF samples from this pool to control runtime rather than passing every source row through Qwen.
+
 ### Group 3: Constructed Sleeper-Style Distributed Triggers
 
 - Source label: `constructed_sleeper`
@@ -362,6 +375,8 @@ Important files:
 - `raw_metrics/attack_residual_significance.csv`
 - `synthetic_datasets/constructed_sleeper_dataset.jsonl`
 - `synthetic_datasets/constructed_sleeper_dataset_summary.json`
+- `synthetic_datasets/real_attack_corpus_source_pool.jsonl`
+- `synthetic_datasets/real_attack_corpus_source_pool_summary.json`
 - `synthetic_datasets/attack_residual_fingerprints_seed_<seed>.jsonl`
 - `synthetic_datasets/attack_residual_fingerprints_seed_<seed>_summary.json`
 - `synthetic_datasets/constructed_sleeper_validation.csv`

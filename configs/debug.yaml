@@ -10,6 +10,13 @@ test_subsample: 300
 ood_subsample: 240
 output_root: outputs
 require_gpu: false
+real_attack_corpus:
+  enabled: true
+  required: true
+  dataset_id: mvrcii/safety-harmful
+  split: train
+  max_records: 1500
+  min_chars: 12
 lora:
   r: 16
   alpha: 32
@@ -37,7 +44,7 @@ fuser:
   lr: 3e-4
 attack_fingerprints:
   enabled: true
-  per_family: 12
+  per_family: 24
   template_holdout: true
   holdout_template_variant: 2
   expansion_factor: 4

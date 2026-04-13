@@ -19,6 +19,7 @@ except ImportError:
 from data.attack_fingerprints import build_attack_fingerprint_pairs
 from data.loaders import ConversationExample, normalize_text, subsample_examples
 from data.multiturn_jailbreak import load_multiturn_jailbreak
+from data.real_attack_corpus import load_real_attack_corpus
 from data.sleeper_builder import build_sleeper_dataset
 from data.splits import apply_split_labels, deterministic_group_split, deterministic_split, save_splits
 from data.wildjailbreak import load_wildjailbreak
@@ -91,6 +92,20 @@ def _base_prompt_record(ex: ConversationExample) -> Dict[str, Any]:
         "base_row_id": meta.get("row_id", ""),
         "base_source_split": meta.get("source_split", ""),
         "base_goal_id": meta.get("goal_id", ""),
+    }
+
+
+def _real_corpus_summary(rows: List[Dict[str, Any]], cfg: Dict[str, Any]) -> Dict[str, Any]:
+    topics = Counter(str(row.get("base_topic", "")) for row in rows)
+    sources = Counter(str(row.get("base_original_source", "")) for row in rows)
+    return {
+        "dataset_id": cfg.get("real_attack_corpus", {}).get("dataset_id", "mvrcii/safety-harmful"),
+        "split": cfg.get("real_attack_corpus", {}).get("split", "train"),
+        "n_records": len(rows),
+        "topic_counts": dict(topics),
+        "original_source_counts": dict(sources),
+        "usage": "large real harmful prompt source pool for ARF controlled counterfactual transformations",
+        "note": "Rows are not all passed through the model; ARF samples from this real pool to control runtime.",
     }
 
 
@@ -198,6 +213,8 @@ def _arf_synthetic_summary(pairs) -> Dict[str, Any]:
     residual_types = Counter(str(pair.metadata.get("residual_type", "")) for pair in pairs)
     constructions = Counter(str(pair.metadata.get("construction", "")) for pair in pairs)
     base_sources = Counter(str((pair.metadata.get("base_harmful") or {}).get("base_source", "")) for pair in pairs)
+    original_sources = Counter(str((pair.metadata.get("base_harmful") or {}).get("base_original_source", "")) for pair in pairs)
+    topics = Counter(str((pair.metadata.get("base_harmful") or {}).get("base_topic", "")) for pair in pairs)
     return {
         "source": "constructed_attack_residual_fingerprints",
         "n_pairs": len(pairs),
@@ -207,6 +224,8 @@ def _arf_synthetic_summary(pairs) -> Dict[str, Any]:
         "residual_type_counts": dict(residual_types),
         "construction_counts": dict(constructions),
         "base_harmful_source_counts": dict(base_sources),
+        "base_harmful_original_source_counts": dict(original_sources),
+        "base_harmful_topic_counts": dict(topics),
         "robustness_design": [
             "matched attack/control prompts per family derived from real loaded prompt pools when available",
             "constructed_sleeper examples are excluded from ARF base prompt pools to avoid synthetic-on-synthetic provenance",
@@ -266,6 +285,7 @@ def _synthetic_validation_rows(sleeper_examples: List[ConversationExample], arf_
         pairs = list(arf_pairs)
         n = max(len(pairs), 1)
         real_count = sum(1 for pair in pairs if str(pair.metadata.get("construction", "")).startswith("real_prompt_derived"))
+        large_real_count = sum(1 for pair in pairs if (pair.metadata.get("base_harmful") or {}).get("base_source") == "mvrcii/safety-harmful")
         holdout_count = sum(1 for pair in pairs if bool(pair.metadata.get("template_holdout", False)))
         rows.extend([
             {
@@ -281,6 +301,13 @@ def _synthetic_validation_rows(sleeper_examples: List[ConversationExample], arf_
                 "value": holdout_count,
                 "expected": 1,
                 "passed": holdout_count >= 1,
+            },
+            {
+                "dataset": "attack_residual_fingerprints",
+                "check": "large_real_corpus_derived_pairs",
+                "value": large_real_count,
+                "expected": 1,
+                "passed": large_real_count >= 1,
             },
             {
                 "dataset": "attack_residual_fingerprints",
@@ -329,7 +356,19 @@ def build_all_datasets(cfg: Dict[str, Any], run_dir: Path, seed: int, logger):
         {"group": "ordinary_multiturn_jailbreak", "source": cfg.get("multiturn_dataset", "ScaleAI/mhj"), "n": len(multi), "note": note},
         {"group": "sleeper_distributed_trigger", "source": "constructed_sleeper", "n": len(sleeper), "note": "Programmatic sleeper-style distributed triggers; separated from public data."},
     ]
-    return {"wild": wild, "multi": multi, "sleeper": sleeper}, summary
+    real_attack_corpus = []
+    if bool(cfg.get("real_attack_corpus", {}).get("enabled", True)):
+        logger.info("Loading large real attack corpus for ARF source pool.")
+        real_attack_corpus = load_real_attack_corpus(cfg)
+        write_jsonl(run_dir / "synthetic_datasets" / "real_attack_corpus_source_pool.jsonl", real_attack_corpus)
+        write_json(run_dir / "synthetic_datasets" / "real_attack_corpus_source_pool_summary.json", _real_corpus_summary(real_attack_corpus, cfg))
+        summary.append({
+            "group": "real_attack_corpus_source_pool",
+            "source": cfg.get("real_attack_corpus", {}).get("dataset_id", "mvrcii/safety-harmful"),
+            "n": len(real_attack_corpus),
+            "note": "Large real harmful prompt pool used to derive ARF counterfactual transformations; not merged into main benchmark metrics.",
+        })
+    return {"wild": wild, "multi": multi, "sleeper": sleeper, "real_attack_corpus": real_attack_corpus}, summary
 
 
 def _balanced_subsample(groups: List[List[ConversationExample]], budget: int) -> List[ConversationExample]:
@@ -371,8 +410,9 @@ def _balanced_subsample(groups: List[List[ConversationExample]], budget: int) ->
 
 
 def _select_eval_examples(datasets: Dict[str, List[ConversationExample]], cfg: Dict[str, Any]) -> Dict[str, List[ConversationExample]]:
-    train_groups = [[ex for ex in group if ex.split == "train"] for group in datasets.values()]
-    val_groups = [[ex for ex in group if ex.split == "val"] for group in datasets.values()]
+    benchmark_groups = [group for group in datasets.values() if group and isinstance(group[0], ConversationExample)]
+    train_groups = [[ex for ex in group if ex.split == "train"] for group in benchmark_groups]
+    val_groups = [[ex for ex in group if ex.split == "val"] for group in benchmark_groups]
     train = _balanced_subsample(train_groups, int(cfg["train_subsample"]))
     val = _balanced_subsample(val_groups, int(cfg["val_subsample"]))
     test_groups = {
@@ -384,6 +424,7 @@ def _select_eval_examples(datasets: Dict[str, List[ConversationExample]], cfg: D
     return {
         "train": train,
         "val": val,
+        "real_attack_corpus": list(datasets.get("real_attack_corpus", [])),
         **{k: subsample_examples(v, int(cfg["ood_subsample"] if k == "sleeper_ood" else cfg["test_subsample"])) for k, v in test_groups.items()},
     }
 
@@ -531,7 +572,9 @@ def _run_attack_fingerprints(
     train_examples = selected.get("train", [])
     public_train_examples = [ex for ex in train_examples if ex.source != "constructed_sleeper"]
     benign_pool = [_base_prompt_record(ex) for ex in public_train_examples if (ex.source_is_benign or ex.target == 0) and _last_user_text(ex)]
-    harmful_pool = [_base_prompt_record(ex) for ex in public_train_examples if ex.target == 1 and _last_user_text(ex)]
+    real_attack_rows = [row for row in selected.get("real_attack_corpus", []) if isinstance(row, dict)]
+    harmful_pool = list(real_attack_rows)
+    harmful_pool.extend(_base_prompt_record(ex) for ex in public_train_examples if ex.target == 1 and _last_user_text(ex))
     pairs = build_attack_fingerprint_pairs(cfg, seed, benign_pool, harmful_pool)
     if not pairs:
         return [], []
