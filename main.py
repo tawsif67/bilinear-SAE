@@ -17,6 +17,7 @@ except ImportError:
     LogisticRegression = None
 
 from data.attack_fingerprints import build_attack_fingerprint_pairs
+from data.external_sources import load_external_source_pools
 from data.loaders import ConversationExample, normalize_text, subsample_examples
 from data.multiturn_jailbreak import load_multiturn_jailbreak
 from data.real_attack_corpus import load_real_attack_corpus
@@ -213,6 +214,7 @@ def _arf_synthetic_summary(pairs) -> Dict[str, Any]:
     residual_types = Counter(str(pair.metadata.get("residual_type", "")) for pair in pairs)
     constructions = Counter(str(pair.metadata.get("construction", "")) for pair in pairs)
     base_sources = Counter(str((pair.metadata.get("base_harmful") or {}).get("base_source", "")) for pair in pairs)
+    dataset_keys = Counter(str((pair.metadata.get("base_harmful") or {}).get("base_dataset_key", "")) for pair in pairs)
     original_sources = Counter(str((pair.metadata.get("base_harmful") or {}).get("base_original_source", "")) for pair in pairs)
     topics = Counter(str((pair.metadata.get("base_harmful") or {}).get("base_topic", "")) for pair in pairs)
     return {
@@ -224,6 +226,7 @@ def _arf_synthetic_summary(pairs) -> Dict[str, Any]:
         "residual_type_counts": dict(residual_types),
         "construction_counts": dict(constructions),
         "base_harmful_source_counts": dict(base_sources),
+        "base_harmful_dataset_key_counts": dict(dataset_keys),
         "base_harmful_original_source_counts": dict(original_sources),
         "base_harmful_topic_counts": dict(topics),
         "robustness_design": [
@@ -286,6 +289,7 @@ def _synthetic_validation_rows(sleeper_examples: List[ConversationExample], arf_
         n = max(len(pairs), 1)
         real_count = sum(1 for pair in pairs if str(pair.metadata.get("construction", "")).startswith("real_prompt_derived"))
         large_real_count = sum(1 for pair in pairs if (pair.metadata.get("base_harmful") or {}).get("base_source") == "mvrcii/safety-harmful")
+        external_count = sum(1 for pair in pairs if str((pair.metadata.get("base_harmful") or {}).get("base_dataset_key", "")) in {"jailbreakbench", "advbench", "lakera_gandalf", "deepset_prompt_injections"})
         holdout_count = sum(1 for pair in pairs if bool(pair.metadata.get("template_holdout", False)))
         rows.extend([
             {
@@ -308,6 +312,13 @@ def _synthetic_validation_rows(sleeper_examples: List[ConversationExample], arf_
                 "value": large_real_count,
                 "expected": 1,
                 "passed": large_real_count >= 1,
+            },
+            {
+                "dataset": "attack_residual_fingerprints",
+                "check": "external_dataset_derived_pairs",
+                "value": external_count,
+                "expected": 1,
+                "passed": external_count >= 1,
             },
             {
                 "dataset": "attack_residual_fingerprints",
@@ -357,6 +368,8 @@ def build_all_datasets(cfg: Dict[str, Any], run_dir: Path, seed: int, logger):
         {"group": "sleeper_distributed_trigger", "source": "constructed_sleeper", "n": len(sleeper), "note": "Programmatic sleeper-style distributed triggers; separated from public data."},
     ]
     real_attack_corpus = []
+    external_attack_pool: List[Dict[str, Any]] = []
+    external_benign_pool: List[Dict[str, Any]] = []
     if bool(cfg.get("real_attack_corpus", {}).get("enabled", True)):
         logger.info("Loading large real attack corpus for ARF source pool.")
         real_attack_corpus = load_real_attack_corpus(cfg)
@@ -368,7 +381,28 @@ def build_all_datasets(cfg: Dict[str, Any], run_dir: Path, seed: int, logger):
             "n": len(real_attack_corpus),
             "note": "Large real harmful prompt pool used to derive ARF counterfactual transformations; not merged into main benchmark metrics.",
         })
-    return {"wild": wild, "multi": multi, "sleeper": sleeper, "real_attack_corpus": real_attack_corpus}, summary
+    if bool(cfg.get("external_datasets", {}).get("enabled", True)):
+        logger.info("Loading external jailbreak/prompt-injection source pools.")
+        external_attack_pool, external_benign_pool, external_summary, external_errors = load_external_source_pools(cfg)
+        write_jsonl(run_dir / "synthetic_datasets" / "external_attack_source_pool.jsonl", external_attack_pool)
+        write_jsonl(run_dir / "synthetic_datasets" / "external_benign_source_pool.jsonl", external_benign_pool)
+        write_jsonl(run_dir / "synthetic_datasets" / "external_dataset_summary.jsonl", external_summary)
+        write_jsonl(run_dir / "synthetic_datasets" / "external_dataset_errors.jsonl", external_errors)
+        for row in external_summary:
+            summary.append({
+                "group": f"external_source_pool:{row['dataset']}",
+                "source": row["dataset_id"],
+                "n": row["n_rows"],
+                "note": f"External {row['kind']} source pool for ARF transformations; errors={row['errors']}.",
+            })
+    return {
+        "wild": wild,
+        "multi": multi,
+        "sleeper": sleeper,
+        "real_attack_corpus": real_attack_corpus,
+        "external_attack_pool": external_attack_pool,
+        "external_benign_pool": external_benign_pool,
+    }, summary
 
 
 def _balanced_subsample(groups: List[List[ConversationExample]], budget: int) -> List[ConversationExample]:
@@ -421,10 +455,18 @@ def _select_eval_examples(datasets: Dict[str, List[ConversationExample]], cfg: D
         "sleeper_distributed_trigger": [ex for ex in datasets["sleeper"] if ex.split == "test" and not ex.is_ood],
         "sleeper_ood": [ex for ex in datasets["sleeper"] if ex.is_ood],
     }
+    external_attack_rows = [row for row in datasets.get("external_attack_pool", []) if isinstance(row, dict)]
+    external_sources = sorted({str(row.get("base_dataset_key", "")) for row in external_attack_rows if row.get("base_dataset_key")})
     return {
         "train": train,
         "val": val,
         "real_attack_corpus": list(datasets.get("real_attack_corpus", [])),
+        "external_attack_pool": list(datasets.get("external_attack_pool", [])),
+        "external_benign_pool": list(datasets.get("external_benign_pool", [])),
+        "external_attack_by_source": {
+            key: [row for row in external_attack_rows if row.get("base_dataset_key") == key]
+            for key in external_sources
+        },
         **{k: subsample_examples(v, int(cfg["ood_subsample"] if k == "sleeper_ood" else cfg["test_subsample"])) for k, v in test_groups.items()},
     }
 
@@ -571,9 +613,12 @@ def _run_attack_fingerprints(
         return [], []
     train_examples = selected.get("train", [])
     public_train_examples = [ex for ex in train_examples if ex.source != "constructed_sleeper"]
-    benign_pool = [_base_prompt_record(ex) for ex in public_train_examples if (ex.source_is_benign or ex.target == 0) and _last_user_text(ex)]
+    benign_pool = list(row for row in selected.get("external_benign_pool", []) if isinstance(row, dict))
+    benign_pool.extend(_base_prompt_record(ex) for ex in public_train_examples if (ex.source_is_benign or ex.target == 0) and _last_user_text(ex))
     real_attack_rows = [row for row in selected.get("real_attack_corpus", []) if isinstance(row, dict)]
+    external_attack_rows = [row for row in selected.get("external_attack_pool", []) if isinstance(row, dict)]
     harmful_pool = list(real_attack_rows)
+    harmful_pool.extend(external_attack_rows)
     harmful_pool.extend(_base_prompt_record(ex) for ex in public_train_examples if ex.target == 1 and _last_user_text(ex))
     pairs = build_attack_fingerprint_pairs(cfg, seed, benign_pool, harmful_pool)
     if not pairs:
@@ -586,6 +631,16 @@ def _run_attack_fingerprints(
     )
     pd.DataFrame(_synthetic_validation_rows([], pairs)).to_csv(run_dir / "synthetic_datasets" / f"attack_residual_fingerprints_seed_{seed}_validation.csv", index=False)
     _write_synthetic_audit_exports(run_dir, arf_pairs=pairs, limit_per_family=int(cfg.get("data", {}).get("audit_examples_per_family", 50)))
+    for source_key, source_rows in selected.get("external_attack_by_source", {}).items():
+        if not source_rows:
+            continue
+        source_pairs = build_attack_fingerprint_pairs(cfg, seed + 1009, benign_pool, source_rows)
+        _write_synthetic_dataset_artifacts(
+            run_dir,
+            f"attack_residual_fingerprints_external_{source_key}_seed_{seed}",
+            [pair.to_dict() for pair in source_pairs],
+            _arf_synthetic_summary(source_pairs),
+        )
     train_pairs = [pair for pair in pairs if pair.split == "train"]
     val_pairs = [pair for pair in pairs if pair.split == "val"]
     test_pairs = [pair for pair in pairs if pair.split == "test"]

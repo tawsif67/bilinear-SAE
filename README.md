@@ -88,6 +88,17 @@ The pipeline keeps real public data separate from constructed sleeper-trigger da
   - The code saves the selected source pool and summary under `synthetic_datasets/`.
   - ARF samples from this pool to control runtime rather than passing every source row through Qwen.
 
+### Additional External Source Pools
+
+The config now enables four additional public source pools for ARF provenance and source-holdout artifact generation:
+
+- [`JailbreakBench/JBB-Behaviors`](https://huggingface.co/datasets/JailbreakBench/JBB-Behaviors)
+- AdvBench via `S3IC/advbench`
+- [`Lakera/gandalf_ignore_instructions`](https://huggingface.co/datasets/Lakera/gandalf_ignore_instructions)
+- [`deepset/prompt-injections`](https://huggingface.co/datasets/deepset/prompt-injections)
+
+These datasets are parsed schema-flexibly and saved as source pools. They are optional by default: if a dataset schema or split changes, the run records the loader error under `synthetic_datasets/external_dataset_errors.jsonl` instead of pretending the source was used. Loaded rows are used to derive ARF counterfactual transformations and per-source ARF artifacts.
+
 ### Group 3: Constructed Sleeper-Style Distributed Triggers
 
 - Source label: `constructed_sleeper`
@@ -377,6 +388,11 @@ Important files:
 - `synthetic_datasets/constructed_sleeper_dataset_summary.json`
 - `synthetic_datasets/real_attack_corpus_source_pool.jsonl`
 - `synthetic_datasets/real_attack_corpus_source_pool_summary.json`
+- `synthetic_datasets/external_attack_source_pool.jsonl`
+- `synthetic_datasets/external_benign_source_pool.jsonl`
+- `synthetic_datasets/external_dataset_summary.jsonl`
+- `synthetic_datasets/external_dataset_errors.jsonl`
+- `synthetic_datasets/attack_residual_fingerprints_external_<source>_seed_<seed>.jsonl`
 - `synthetic_datasets/attack_residual_fingerprints_seed_<seed>.jsonl`
 - `synthetic_datasets/attack_residual_fingerprints_seed_<seed>_summary.json`
 - `synthetic_datasets/constructed_sleeper_validation.csv`

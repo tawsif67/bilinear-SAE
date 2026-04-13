@@ -16,7 +16,7 @@ py -3 -m py_compile @($files.FullName)
 import importlib
 mods = [
  'utils.seed','utils.io','utils.config_utils','utils.logging_utils','utils.dependencies',
- 'data.loaders','data.splits','data.wildjailbreak','data.multiturn_jailbreak','data.sleeper_builder','data.attack_fingerprints','data.real_attack_corpus',
+ 'data.loaders','data.splits','data.wildjailbreak','data.multiturn_jailbreak','data.sleeper_builder','data.attack_fingerprints','data.real_attack_corpus','data.external_sources',
  'models.subject','models.sae','models.trajectory','models.fusion','models.baselines','models.interventions','models.ctcr','models.arf',
  'train.train_lora','train.train_sae','train.train_ctcr','train.train_arf','train.train_fuser',
  'eval.judge','eval.generate','eval.metrics','eval.ablations','eval.significance','eval.mechanistic_taxonomy','eval.conjunction_tests','eval.causal_interventions','eval.null_controls','eval.transfer','eval.layer_sweep',

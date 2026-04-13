@@ -17,6 +17,41 @@ real_attack_corpus:
   split: train
   max_records: 1500
   min_chars: 12
+external_datasets:
+  enabled: true
+  datasets:
+    jailbreakbench:
+      enabled: true
+      required: false
+      dataset_id: JailbreakBench/JBB-Behaviors
+      configs: [behaviors, null]
+      splits: [harmful, train]
+      kind: harmful_behavior
+      max_records: 200
+    advbench:
+      enabled: true
+      required: false
+      dataset_id: S3IC/advbench
+      configs: [null]
+      splits: [train]
+      kind: harmful_behavior
+      max_records: 520
+    lakera_gandalf:
+      enabled: true
+      required: false
+      dataset_id: Lakera/gandalf_ignore_instructions
+      configs: [null]
+      splits: [train, validation, test]
+      kind: prompt_injection
+      max_records: 1000
+    deepset_prompt_injections:
+      enabled: true
+      required: false
+      dataset_id: deepset/prompt-injections
+      configs: [null]
+      splits: [train, test]
+      kind: prompt_injection_binary
+      max_records: 662
 lora:
   r: 16
   alpha: 32
