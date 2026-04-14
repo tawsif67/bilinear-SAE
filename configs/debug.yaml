@@ -119,6 +119,7 @@ eval:
   thresholds: [inf, 0.90, 0.75, 0.60, 0.45, 0.30, 0.20, 0.10, 0.05]
   seeds: [42]
   human_eval_samples: 32
+  save_raw_threshold_rows: false
 data:
   sleeper_per_family: 60
   sleeper_ood_per_family: 30

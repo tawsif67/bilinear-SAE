@@ -50,6 +50,8 @@ def validate_config(cfg: Dict[str, Any]) -> None:
             raise ValueError("publication_mode requires external_sleeper.enabled=true and external_sleeper.required=true.")
         if not sleeper_cfg.get("local_path") and not sleeper_cfg.get("hf_dataset_id"):
             raise ValueError("publication_mode requires a real external_sleeper.local_path or external_sleeper.hf_dataset_id.")
+        if sleeper_cfg.get("local_path") and not Path(str(sleeper_cfg["local_path"])).exists():
+            raise ValueError(f"publication_mode external_sleeper.local_path does not exist: {sleeper_cfg['local_path']}")
         judge_cfg = cfg.get("strong_judge", {})
         if not bool(judge_cfg.get("enabled", False)):
             raise ValueError("publication_mode requires strong_judge.enabled=true.")

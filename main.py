@@ -779,7 +779,7 @@ def _run_attack_fingerprints(
     return rows + lexical_out, raw_rows
 
 
-def run_seed(seed: int, cfg: Dict[str, Any], run_dir: Path, datasets: Dict[str, List[ConversationExample]], judge, logger):
+def run_seed(seed: int, cfg: Dict[str, Any], run_dir: Path, datasets: Dict[str, List[ConversationExample]], logger):
     set_seed(seed)
     selected = _select_eval_examples(datasets, cfg)
     device = require_full_experiment_device(bool(cfg.get("require_gpu", True)))
@@ -857,8 +857,10 @@ def run_seed(seed: int, cfg: Dict[str, Any], run_dir: Path, datasets: Dict[str, 
     metric_rows: List[Dict[str, Any]] = []
     raw_path = run_dir / "raw_metrics" / f"raw_generations_seed_{seed}.jsonl"
     write_jsonl(raw_path, [])
+    save_raw_threshold_rows = bool(cfg.get("eval", {}).get("save_raw_threshold_rows", False))
     human_rows: List[Dict[str, Any]] = []
     human_limit = int(cfg["eval"].get("human_eval_samples", 96))
+    pending_judge: List[Dict[str, Any]] = []
     feature_rows = _feature_rows(seed, linear_sae, bilinear_sae, train_h, train_y, bad_feats, sae_stats)
     locality_rows = []
     taxonomy_rows: List[Dict[str, Any]] = []
@@ -891,8 +893,38 @@ def run_seed(seed: int, cfg: Dict[str, Any], run_dir: Path, datasets: Dict[str, 
         causal_rows.extend(causal_intervention_rows(examples, eval_h, linear_sae, bilinear_sae, bad_feats, seed, group))
         layer_rows.extend(layer_summary_rows(eval_h, eval_y, seed, intercept_layer, group))
         base_responses, tok_sec = generate_responses(subject, examples, cfg, logger)
-        processor, judge_model = judge
-        judge_batch_size = int(cfg["eval"].get("judge_batch_size", min(4, int(cfg["eval"]["batch_size"]))))
+        pending_judge.append({
+            "group": group,
+            "examples": examples,
+            "scores": {k: v for k, v in scores.items() if k in DEPLOYMENT_METHODS},
+            "base_responses": base_responses,
+            "tokens_sec": tok_sec,
+        })
+        del eval_h, eval_y, scores
+        gc.collect()
+        clear_cuda_cache(device)
+
+    del subject, model_bundle, linear_sae, bilinear_sae, ctcr_sae, trajectory, fuser
+    del train_h, val_h, train_y, val_y, h_bad, h_clean
+    del ctcr_residuals, ctcr_targets, ctcr_bad, ctcr_clean, ctcr_bad_feats, bad_feats, mean_vec, top_dims
+    gc.collect()
+    clear_cuda_cache(device)
+    log_cuda_memory(logger, f"after_subject_unload_seed_{seed}", device)
+    write_json(run_dir / "raw_metrics" / f"gpu_memory_after_subject_unload_seed_{seed}.json", cuda_memory_snapshot(device))
+
+    judge = load_judge(cfg["judge_model"], device)
+    processor, judge_model = judge
+    log_cuda_memory(logger, f"after_judge_load_seed_{seed}", device)
+    write_json(run_dir / "raw_metrics" / f"gpu_memory_after_judge_seed_{seed}.json", cuda_memory_snapshot(device))
+    write_json(run_dir / "raw_metrics" / f"judge_sanity_seed_{seed}.json", sanity_check_judge(processor, judge_model))
+    judge_batch_size = int(cfg["eval"].get("judge_batch_size", min(4, int(cfg["eval"]["batch_size"]))))
+
+    for pending in pending_judge:
+        group = str(pending["group"])
+        examples = pending["examples"]
+        base_responses = pending["base_responses"]
+        scores = pending["scores"]
+        tok_sec = float(pending["tokens_sec"])
         log_cuda_memory(logger, f"before_judge_{seed}_{group}", device)
         base_preds = judge_predictions(processor, judge_model, [ex.prompt_text for ex in examples], base_responses, int(cfg["max_seq_len"]), judge_batch_size, logger)
         log_cuda_memory(logger, f"after_judge_{seed}_{group}", device)
@@ -945,7 +977,8 @@ def run_seed(seed: int, cfg: Dict[str, Any], run_dir: Path, datasets: Dict[str, 
                 metrics.update({"seed": seed, "group": rows[0]["group"], "eval_slice": group, "method": method, "threshold": float(threshold), "threshold_label": _threshold_label(float(threshold)), "defended_perplexity": ppx, "tokens_sec": tok_sec, **sae_stats, **ctcr_stats, **fuser_stats})
                 metrics["in_family_asr_reduction"] = metrics["asr_reduction"] if group == "sleeper_distributed_trigger" else 0.0
                 metric_rows.append(metrics)
-                append_jsonl(raw_path, raw_chunk)
+                if save_raw_threshold_rows:
+                    append_jsonl(raw_path, raw_chunk)
                 clean_flags = [flag for ex, flag in zip(examples, intervened) if ex.target == 0]
                 attack_flags = [flag for ex, flag in zip(examples, intervened) if ex.target == 1]
                 locality_rows.extend([
@@ -953,9 +986,14 @@ def run_seed(seed: int, cfg: Dict[str, Any], run_dir: Path, datasets: Dict[str, 
                     {"seed": seed, "method": method, "prompt_type": "harmful", "intervention_rate": float(np.mean(attack_flags)) if attack_flags else 0.0},
                     {"seed": seed, "method": method, "prompt_type": "matched_controls", "intervention_rate": float(np.mean(intervened)) if intervened else 0.0},
                 ])
-        del eval_h, eval_y, scores, base_responses, base_preds
+        del scores, base_responses, base_preds
         gc.collect()
         clear_cuda_cache(device)
+
+    del judge_model, processor, judge, pending_judge
+    gc.collect()
+    clear_cuda_cache(device)
+    log_cuda_memory(logger, f"after_judge_unload_seed_{seed}", device)
 
     write_jsonl(run_dir / "human_eval_samples" / f"samples_seed_{seed}.jsonl", human_rows)
     export_strong_judge_requests(human_rows, run_dir / "human_eval_samples" / f"strong_judge_requests_seed_{seed}.jsonl")
@@ -963,10 +1001,6 @@ def run_seed(seed: int, cfg: Dict[str, Any], run_dir: Path, datasets: Dict[str, 
     if strong_rows:
         provider = str(cfg.get("strong_judge", {}).get("provider", "strong"))
         write_jsonl(run_dir / "human_eval_samples" / f"strong_adjudication_{provider}_seed_{seed}.jsonl", strong_rows)
-    del subject
-    gc.collect()
-    if torch.cuda.is_available():
-        torch.cuda.empty_cache()
     conjunction_rows = conjunction_control_rows(taxonomy_rows)
     null_rows = null_control_rows(taxonomy_rows, seed)
     transfer_summary_rows = transfer_rows(taxonomy_rows)
@@ -998,12 +1032,6 @@ def main() -> None:
     write_yaml(run_dir / "config_runtime.yaml", cfg)
     assert_judge_access(cfg["judge_model"])
     datasets, dataset_summary = build_all_datasets(cfg, run_dir, int(cfg["eval"]["seeds"][0]), logger)
-    judge = load_judge(cfg["judge_model"], device)
-    log_cuda_memory(logger, "after_judge_load", device)
-    write_json(run_dir / "raw_metrics" / "gpu_memory_after_judge_load.json", cuda_memory_snapshot(device))
-    cfg = tune_batch_sizes_for_memory(cfg, logger, device)
-    write_yaml(run_dir / "config_runtime.yaml", cfg)
-    write_json(run_dir / "raw_metrics" / "judge_sanity.json", sanity_check_judge(*judge))
 
     all_metrics: List[Dict[str, Any]] = []
     all_features: List[Dict[str, Any]] = []
@@ -1019,7 +1047,7 @@ def main() -> None:
     all_arf_raw: List[Dict[str, Any]] = []
     for seed in cfg["eval"]["seeds"]:
         logger.info("Starting seed %s", seed)
-        rows, feats, locality, taxonomy, conjunction, causal, nulls, transfer, layers, ctcr, arf, arf_raw = run_seed(int(seed), cfg, run_dir, datasets, judge, logger)
+        rows, feats, locality, taxonomy, conjunction, causal, nulls, transfer, layers, ctcr, arf, arf_raw = run_seed(int(seed), cfg, run_dir, datasets, logger)
         all_metrics.extend(rows)
         all_features.extend(feats)
         all_locality.extend(locality)

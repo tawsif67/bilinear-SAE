@@ -426,8 +426,11 @@ The default config is intentionally scaled for safer single-GPU runs rather than
 - sleeper examples per family: `240`
 - sleeper OOD examples per family: `120`
 - SAE/fuser steps: `1200 / 800`
+- raw per-example threshold rows: disabled by default with `eval.save_raw_threshold_rows: false`
 
-Raw per-threshold outputs are streamed to JSONL without repeated response text. Qualitative prompt/response text is kept separately under `human_eval_samples/`, which avoids host-RAM blowups during postprocessing.
+Raw per-threshold outputs can be streamed to JSONL without repeated response text by setting `eval.save_raw_threshold_rows: true`. Qualitative prompt/response text is kept separately under `human_eval_samples/`, which avoids host-RAM blowups during postprocessing.
+
+The run now uses a lower-memory judge lifecycle: Qwen/SAE/fuser work is completed first, the subject stack is freed, and then Gemma is loaded for compliance scoring. This avoids keeping Qwen 3B and Gemma 4B resident on the GPU at the same time.
 
 ## Configs
 
@@ -512,6 +515,8 @@ Important files:
 - `raw_metrics/method_manifest.csv`
 - `raw_metrics/validity_warnings.json`
 - `raw_metrics/strong_judge_status.json`
+- `raw_metrics/gpu_memory_after_subject_unload_seed_<seed>.json`
+- `raw_metrics/gpu_memory_after_judge_seed_<seed>.json`
 - `raw_metrics/residual_group_integrity_seed_<seed>.csv`
 - `raw_metrics/residual_group_integrity_<group>_seed_<seed>.csv`
 - `tables/main_results.csv`
