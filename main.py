@@ -921,7 +921,8 @@ def run_seed(seed: int, cfg: Dict[str, Any], run_dir: Path, datasets: Dict[str, 
     export_strong_judge_requests(human_rows, run_dir / "human_eval_samples" / f"strong_judge_requests_seed_{seed}.jsonl")
     strong_rows = run_configured_strong_adjudication(human_rows, cfg)
     if strong_rows:
-        write_jsonl(run_dir / "human_eval_samples" / f"gpt5_adjudication_seed_{seed}.jsonl", strong_rows)
+        provider = str(cfg.get("strong_judge", {}).get("provider", "strong"))
+        write_jsonl(run_dir / "human_eval_samples" / f"strong_adjudication_{provider}_seed_{seed}.jsonl", strong_rows)
     del subject
     gc.collect()
     if torch.cuda.is_available():

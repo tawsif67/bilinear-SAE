@@ -204,13 +204,26 @@ If no external sleeper data is loaded, the run still completes, but `raw_metrics
 
 ## Judge Policy
 
-Gemma 3 4B remains the default local judge for reproducible budget-limited runs. For paper-grade main results, use GPT-5 or human adjudication:
+Gemma 3 4B remains the default local judge for reproducible budget-limited runs. For no-cost adjudication beyond Gemma, the repo supports a local Hugging Face LLM adjudicator. The default free adjudicator model is `Qwen/Qwen2.5-1.5B-Instruct`; it requires no OpenAI key, but it does require downloading/loading the model locally.
+
+Enable free local LLM adjudication with:
+
+```yaml
+strong_judge:
+  enabled: true
+  provider: local_hf
+  local_model: Qwen/Qwen2.5-1.5B-Instruct
+  max_seq_len: 768
+  batch_size: 4
+```
+
+For paper-grade main results, use GPT-5 or human adjudication:
 
 - export requests: `human_eval_samples/strong_judge_requests_seed_<seed>.jsonl`
 - annotate with GPT-5, Claude-class, or human labels
 - report agreement against Gemma and include inter-annotator agreement for any human sample
 
-The repo includes `eval/strong_judge.py` with a `GPT5ComplianceAdjudicator` class. Strong judging is disabled by default to avoid requiring API keys during debug runs. Enable it with:
+The repo includes `eval/strong_judge.py` with both `LocalHFComplianceAdjudicator` and `GPT5ComplianceAdjudicator`. Strong judging is disabled by default to avoid adding another model load during debug runs. Enable GPT-5 adjudication with:
 
 ```yaml
 strong_judge:

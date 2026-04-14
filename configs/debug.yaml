@@ -63,9 +63,12 @@ external_sleeper:
   max_records: 200
 strong_judge:
   enabled: false
-  provider: openai_gpt5
+  provider: local_hf
   openai_model: gpt-5
   anthropic_model: null
+  local_model: Qwen/Qwen2.5-1.5B-Instruct
+  max_seq_len: 768
+  batch_size: 4
   annotation_file: null
 lora:
   r: 16
