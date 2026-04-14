@@ -31,10 +31,10 @@ from eval.generate import extract_hidden_trajectories, generate_responses
 from eval.judge import assert_judge_access, judge_predictions, load_judge, sanity_check_judge
 from eval.layer_sweep import layer_summary_rows
 from eval.mechanistic_taxonomy import mechanistic_taxonomy_rows
-from eval.metrics import compute_metrics
+from eval.metrics import compute_metrics, safe_auprc, safe_auroc
 from eval.null_controls import null_control_rows
 from eval.significance import significance_rows
-from eval.strong_judge import export_strong_judge_requests
+from eval.strong_judge import export_strong_judge_requests, run_configured_strong_adjudication
 from eval.transfer import transfer_rows
 from models.baselines import ActivationProbe, DenseLinearProbe, mean_difference_vector, top_mean_difference_dims
 from models.baselines import TorchMLPProbe
@@ -738,7 +738,12 @@ def _run_attack_fingerprints(
             clear_cuda_cache(subject.device)
     del train_resid
     clear_cuda_cache(subject.device)
-    return rows + [{**row, "family": "all", "arf_mse": 0.0, "arf_l1": 0.0, "method": "lexical_baseline"} for row in lexical_rows], raw_rows
+    lexical_out = []
+    for row in lexical_rows:
+        baseline = str(row.get("baseline", "lexical"))
+        method = "lexical_baseline" if baseline == "lexical_best" else f"lexical_{baseline}"
+        lexical_out.append({**row, "family": "all", "arf_mse": 0.0, "arf_l1": 0.0, "method": method})
+    return rows + lexical_out, raw_rows
 
 
 def run_seed(seed: int, cfg: Dict[str, Any], run_dir: Path, datasets: Dict[str, List[ConversationExample]], judge, logger):
@@ -914,6 +919,9 @@ def run_seed(seed: int, cfg: Dict[str, Any], run_dir: Path, datasets: Dict[str, 
 
     write_jsonl(run_dir / "human_eval_samples" / f"samples_seed_{seed}.jsonl", human_rows)
     export_strong_judge_requests(human_rows, run_dir / "human_eval_samples" / f"strong_judge_requests_seed_{seed}.jsonl")
+    strong_rows = run_configured_strong_adjudication(human_rows, cfg)
+    if strong_rows:
+        write_jsonl(run_dir / "human_eval_samples" / f"gpt5_adjudication_seed_{seed}.jsonl", strong_rows)
     del subject
     gc.collect()
     if torch.cuda.is_available():
@@ -997,6 +1005,23 @@ def main() -> None:
     arf_raw_df = pd.DataFrame(all_arf_raw)
     arf_diag_df = pd.DataFrame(arf_diagnostic_rows(all_arf))
     arf_sig_df = pd.DataFrame(arf_significance_rows(all_arf))
+    ctcr_formula_summary_rows = []
+    if not ctcr_df.empty and {"method", "ctcr_formula", "target", "ctcr_residual_score"}.issubset(ctcr_df.columns):
+        formula_df = ctcr_df[ctcr_df["method"] == "ctcr_formula_ablation"].copy()
+        for (seed, eval_slice, formula), group_df in formula_df.groupby(["seed", "eval_slice", "ctcr_formula"], dropna=False):
+            y = group_df["target"].astype(int).to_numpy()
+            score = group_df["ctcr_residual_score"].astype(float).to_numpy()
+            ctcr_formula_summary_rows.append({
+                "seed": seed,
+                "eval_slice": eval_slice,
+                "ctcr_formula": formula,
+                "n": int(len(group_df)),
+                "mean_score": float(np.mean(score)) if len(score) else 0.0,
+                "mean_residual_norm": float(group_df["ctcr_residual_norm"].astype(float).mean()) if "ctcr_residual_norm" in group_df.columns and len(group_df) else 0.0,
+                "auroc": safe_auroc(y, score),
+                "auprc": safe_auprc(y, score),
+            })
+    ctcr_formula_summary_df = pd.DataFrame(ctcr_formula_summary_rows)
     sig_df = pd.DataFrame(significance_rows(all_metrics))
     dataset_df = pd.DataFrame(dataset_summary)
     config_df = pd.DataFrame([{"key": k, "value": str(v)} for k, v in cfg.items()])
@@ -1029,6 +1054,7 @@ def main() -> None:
     transfer_df.to_csv(run_dir / "raw_metrics" / "transfer_results.csv", index=False)
     layer_df.to_csv(run_dir / "raw_metrics" / "layer_summary.csv", index=False)
     ctcr_df.to_csv(run_dir / "raw_metrics" / "ctcr_residuals.csv", index=False)
+    ctcr_formula_summary_df.to_csv(run_dir / "raw_metrics" / "ctcr_formula_ablation_summary.csv", index=False)
     arf_df.to_csv(run_dir / "raw_metrics" / "attack_residual_fingerprints.csv", index=False)
     arf_raw_df.to_csv(run_dir / "raw_metrics" / "attack_residual_pairs.csv", index=False)
     arf_diag_df.to_csv(run_dir / "raw_metrics" / "attack_residual_diagnostics.csv", index=False)
@@ -1040,6 +1066,7 @@ def main() -> None:
     arf_diag_df.to_csv(run_dir / "tables" / "attack_residual_diagnostics.csv", index=False)
     arf_sig_df.to_csv(run_dir / "tables" / "attack_residual_significance.csv", index=False)
     method_manifest_df.to_csv(run_dir / "tables" / "method_manifest.csv", index=False)
+    ctcr_formula_summary_df.to_csv(run_dir / "tables" / "ctcr_formula_ablation_summary.csv", index=False)
     make_main_figures(metrics_df, feature_df, run_dir / "figures")
     make_appendix_figures(metrics_df, feature_df, locality_df, run_dir / "figures")
     make_mechanistic_claim_figures(taxonomy_df, conjunction_df, causal_df, run_dir / "figures")

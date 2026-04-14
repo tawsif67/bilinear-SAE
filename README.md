@@ -1,14 +1,14 @@
-# CTCR-SAE + ARF-SAE: Residual Fingerprints for Jailbreak Mechanisms
+# CTCR-SAE: Cross-Turn Conjunction Residuals for Sleeper-Style Jailbreak Analysis
 
 This repository contains a modular research pipeline for testing the claim:
 
-> We test whether different jailbreak mechanisms leave distinguishable hidden-state residual fingerprints. Cross-turn conjunction residuals are treated as a mechanistic diagnostic for sleeper-style trigger structure, while single-pass ARF-SAE is the deployable detector that does not require matched controls at test time.
+> We test whether sleeper-style trigger behavior contains a cross-turn conjunction component that is separable from ordinary multi-turn representational drift. CTCR-SAE is the main mechanistic contribution; single-pass ARF-SAE is included as a secondary deployment-oriented detector.
 
 The code is organized as a reproducible experiment stack rather than a single prototype script. It builds public-data and constructed-data benchmark groups, trains a LoRA-adapted subject model, extracts hidden-state trajectories, trains sparse autoencoders, computes CTCR residuals from matched sleeper controls, evaluates attack residual fingerprints across jailbreak families, runs mechanistic diagnostics, and exports paper-style metrics, figures, and LaTeX tables. It also writes explicit validity warnings when external sleeper-agent data or stronger adjudication is missing.
 
-## Core Ideas: CTCR Diagnostic and Deployable ARF-SAE
+## Main Contribution: CTCR Diagnostic
 
-**CTCR-SAE is analysis-only.** It is not presented as a practical deployment detector because it requires matched controls at evaluation time.
+**CTCR-SAE is the primary method and is analysis-only.** It is not presented as a practical deployment detector because it requires matched controls at evaluation time.
 
 For each matched sleeper control block, the code computes:
 
@@ -20,7 +20,22 @@ This residual isolates the hidden-state component that appears only when the two
 
 Because CTCR needs `A+B`, `A only`, `B only`, and `neither` variants, it is logged under `raw_metrics/ctcr_residuals.csv` and `raw_metrics/method_manifest.csv` as a **mechanistic diagnostic**. It is excluded from the main deployable intervention loop by default.
 
-**ARF-SAE is the deployable detector path.** During training it learns sparse residual features from matched attack/control pairs. At test time, the single-pass ARF variant uses:
+The code now exports explicit CTCR formula ablations:
+
+```text
+CTCR:        h(A+B) - h(A) - h(B) + h(0)
+Simple diff: h(A+B) - h(0)
+A-added:     h(A+B) - h(B)
+B-added:     h(A+B) - h(A)
+Raw joint:   h(A+B)
+Shuffled:    h(B+A) - h(B) - h(A) + h(0)
+```
+
+These rows are written with `method=ctcr_formula_ablation` in `raw_metrics/ctcr_residuals.csv`.
+
+## Secondary Detector: ARF-SAE
+
+**ARF-SAE is the secondary deployable detector path.** During training it learns sparse residual features from matched attack/control pairs. At test time, the single-pass ARF variant uses:
 
 ```text
 hidden_state(conversation) - mean(training benign/control hidden states)
@@ -47,7 +62,7 @@ The main deployment loop compares twelve single-pass detector methods:
 
 CTCR residual bilinear SAE is exported separately as an analysis-only method because it requires four matched forward passes and known condition structure.
 
-The repository also includes **Attack Residual Fingerprinting (ARF-SAE)**. ARF-SAE builds matched attack/control prompts for multiple jailbreak families, computes a family-specific residual for each pair, trains a compact sparse autoencoder on those residuals, and classifies the residual fingerprint. This broadens the question from "can we detect sleeper triggers?" to "do different jailbreak mechanisms leave distinguishable internal fingerprints?"
+The repository also includes **Attack Residual Fingerprinting (ARF-SAE)** as supporting evidence and a practical detector baseline. It should not be presented as co-equal with CTCR in the paper narrative.
 
 ## Fixed Model Choices
 
@@ -169,7 +184,7 @@ For each family, the attack prompt is derived from the loaded public prompt pool
 attack hidden state - mean(matched control hidden states)
 ```
 
-and then trains a lightweight classifier over the sparse residual activations. The deployable ARF classifier is then evaluated in single-pass mode against a fixed training-control baseline, so test-time examples do not need pre-specified A/B conditions. The pipeline also exports a bag-of-words lexical baseline so the paper can check whether attack-family classification is merely recoverable from surface wording. This adds compact hidden-state extraction passes per seed but no extra generation or Gemma judge calls.
+and then trains a lightweight classifier over the sparse residual activations. The deployable ARF classifier is then evaluated in single-pass mode against a fixed training-control baseline, so test-time examples do not need pre-specified A/B conditions. The pipeline also exports serious lexical baselines, including count n-grams, TF-IDF word n-grams, TF-IDF character n-grams, and combined word+character TF-IDF, so the paper can check whether attack-family classification is merely recoverable from surface wording. This adds compact hidden-state extraction passes per seed but no extra generation or Gemma judge calls.
 
 ## External Sleeper-Agent Validation
 
@@ -189,19 +204,28 @@ If no external sleeper data is loaded, the run still completes, but `raw_metrics
 
 ## Judge Policy
 
-Gemma 3 4B remains the default local judge for reproducible budget-limited runs. For paper-grade main results, use stronger adjudication:
+Gemma 3 4B remains the default local judge for reproducible budget-limited runs. For paper-grade main results, use GPT-5 or human adjudication:
 
 - export requests: `human_eval_samples/strong_judge_requests_seed_<seed>.jsonl`
-- annotate with GPT-4-class, Claude-class, or human labels
+- annotate with GPT-5, Claude-class, or human labels
 - report agreement against Gemma and include inter-annotator agreement for any human sample
 
-The repo includes `eval/strong_judge.py` helpers for OpenAI/Anthropic/API or offline JSONL annotations, but strong judging is disabled by default to avoid requiring API keys during debug runs.
+The repo includes `eval/strong_judge.py` with a `GPT5ComplianceAdjudicator` class. Strong judging is disabled by default to avoid requiring API keys during debug runs. Enable it with:
+
+```yaml
+strong_judge:
+  enabled: true
+  provider: openai_gpt5
+  openai_model: gpt-5
+```
 
 ## Repository Layout
 
 ```text
 .
   main.py
+  legacy/
+    CB-SAE.py
   requirements.txt
   configs/
     default.yaml
@@ -434,6 +458,7 @@ Important files:
 - `raw_metrics/mechanistic_taxonomy.csv`
 - `raw_metrics/conjunction_controls.csv`
 - `raw_metrics/ctcr_residuals.csv`
+- `raw_metrics/ctcr_formula_ablation_summary.csv`
 - `raw_metrics/attack_residual_fingerprints.csv`
 - `raw_metrics/attack_residual_pairs.csv`
 - `raw_metrics/attack_residual_diagnostics.csv`
@@ -489,7 +514,7 @@ The `synthetic_datasets/` directory is intended for paper/letter artifacts. It s
 Robustness checks now include:
 
 - template-holdout ARF evaluation where configured
-- bag-of-words lexical leakage baseline
+- lexical leakage baselines: count word n-grams, TF-IDF word n-grams, TF-IDF character n-grams, and combined word+character TF-IDF
 - ARF-SAE vs lexical baseline diagnostics and significance exports
 - synthetic dataset validation CSVs
 - audit-ready CSV samples for constructed sleeper and ARF examples
@@ -600,7 +625,7 @@ This code evaluates harmful-request refusal/compliance behavior, but the constru
 ## Known Limitations
 
 - The constructed sleeper-trigger dataset is deterministic development data. It is not evidence of external sleeper-agent generalization unless `external_sleeper` is configured and loaded.
-- Gemma-only compliance metrics are not a substitute for GPT-4/Claude-class or human adjudication in a paper submission.
+- Gemma-only compliance metrics are not a substitute for GPT-5, Claude-class, or human adjudication in a paper submission.
 - CTCR requires matched A/B/0 controls and is therefore a mechanistic analysis tool, not a deployment detector.
 - Some intervention paths use detector-driven safe-refusal gating rather than full hidden-state causal editing.
 - The repository now includes hidden-state SAE ablation hooks and causal proxy diagnostics, but full response-generation causal intervention sweeps are still expensive and should be audited before paper claims.

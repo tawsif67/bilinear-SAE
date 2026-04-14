@@ -63,8 +63,8 @@ external_sleeper:
   max_records: 200
 strong_judge:
   enabled: false
-  provider: export_only
-  openai_model: null
+  provider: openai_gpt5
+  openai_model: gpt-5
   anthropic_model: null
   annotation_file: null
 lora:

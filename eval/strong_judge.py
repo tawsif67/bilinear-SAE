@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from dataclasses import dataclass
 import json
 import os
 from pathlib import Path
@@ -26,6 +27,63 @@ def export_strong_judge_requests(rows: Iterable[Dict[str, Any]], path: Path) -> 
             f.write(json.dumps({"id": row.get("example_id", idx), "prompt": prompt, "metadata": row}, ensure_ascii=False) + "\n")
 
 
+@dataclass
+class GPT5ComplianceAdjudicator:
+    model: str = "gpt-5"
+
+    def __post_init__(self) -> None:
+        try:
+            from openai import OpenAI
+        except ImportError as e:
+            raise RuntimeError("GPT-5 adjudication requires `pip install openai` and OPENAI_API_KEY.") from e
+        if not os.getenv("OPENAI_API_KEY"):
+            raise RuntimeError("OPENAI_API_KEY is not set; cannot run GPT-5 adjudication.")
+        self.client = OpenAI()
+
+    def adjudicate_one(self, request: str, response: str) -> Dict[str, Any]:
+        prompt = STRONG_JUDGE_PROMPT.format(request=request, response=response)
+        result = self.client.responses.create(model=self.model, input=prompt)
+        text = getattr(result, "output_text", "").strip()
+        label = _parse_label(text)
+        return {"label": label, "raw_response": text, "model": self.model}
+
+    def adjudicate_rows(self, rows: Iterable[Dict[str, Any]]) -> List[Dict[str, Any]]:
+        out: List[Dict[str, Any]] = []
+        for idx, row in enumerate(rows):
+            result = self.adjudicate_one(str(row.get("prompt", "")), str(row.get("base_response", "")))
+            out.append({
+                "id": str(row.get("example_id", idx)),
+                "label": int(result["label"]),
+                "model": result["model"],
+                "raw_response": result["raw_response"],
+                "metadata": row,
+            })
+        return out
+
+
+def run_configured_strong_adjudication(rows: List[Dict[str, Any]], cfg: Dict[str, Any]) -> List[Dict[str, Any]]:
+    judge_cfg = cfg.get("strong_judge", {})
+    if not bool(judge_cfg.get("enabled", False)):
+        return []
+    if not rows:
+        return []
+    provider = str(judge_cfg.get("provider", "openai_gpt5"))
+    if provider == "export_only":
+        return []
+    if provider in {"openai", "openai_gpt5", "gpt5"}:
+        model = str(judge_cfg.get("openai_model") or "gpt-5")
+        return GPT5ComplianceAdjudicator(model=model).adjudicate_rows(rows)
+    if provider in {"annotations", "external_annotations"}:
+        labels = load_external_annotations(judge_cfg.get("annotation_file"))
+        out = []
+        for idx, row in enumerate(rows):
+            row_id = str(row.get("example_id", idx))
+            if row_id in labels:
+                out.append({"id": row_id, "label": labels[row_id], "model": "external_annotation", "metadata": row})
+        return out
+    raise RuntimeError(f"Unknown strong_judge.provider: {provider}")
+
+
 def load_external_annotations(path: str | None) -> Dict[str, int]:
     if not path:
         return {}
@@ -47,19 +105,10 @@ def load_external_annotations(path: str | None) -> Dict[str, int]:
 
 
 def judge_with_openai(requests: List[Dict[str, str]], model: str) -> List[int]:
-    try:
-        from openai import OpenAI
-    except ImportError as e:
-        raise RuntimeError("OpenAI strong judge requires `pip install openai` and OPENAI_API_KEY.") from e
-    if not os.getenv("OPENAI_API_KEY"):
-        raise RuntimeError("OPENAI_API_KEY is not set; cannot run OpenAI strong judge.")
-    client = OpenAI()
+    adjudicator = GPT5ComplianceAdjudicator(model=model)
     labels: List[int] = []
     for item in requests:
-        prompt = STRONG_JUDGE_PROMPT.format(request=item["request"], response=item["response"])
-        result = client.responses.create(model=model, input=prompt)
-        text = getattr(result, "output_text", "").strip()
-        labels.append(_parse_label(text))
+        labels.append(int(adjudicator.adjudicate_one(item["request"], item["response"])["label"]))
     return labels
 
 

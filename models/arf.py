@@ -6,14 +6,17 @@ from typing import Any, Dict, List, Sequence, Tuple
 import numpy as np
 import torch
 try:
-    from sklearn.feature_extraction.text import CountVectorizer
+    from sklearn.feature_extraction.text import CountVectorizer, TfidfVectorizer
     from sklearn.linear_model import LogisticRegression
     from sklearn.metrics import accuracy_score, f1_score
+    from sklearn.pipeline import FeatureUnion
 except ImportError:
     CountVectorizer = None
+    TfidfVectorizer = None
     LogisticRegression = None
     accuracy_score = None
     f1_score = None
+    FeatureUnion = None
 try:
     from scipy.stats import wilcoxon
 except ImportError:
@@ -250,14 +253,47 @@ def lexical_baseline_rows(
     valid = y_eval >= 0
     if not np.any(valid):
         return []
-    if CountVectorizer is not None and LogisticRegression is not None and len(np.unique(y_train)) > 1:
-        vec = CountVectorizer(max_features=max_features, ngram_range=(1, 2), min_df=1)
-        x_train = vec.fit_transform(train_text)
-        x_eval = vec.transform(eval_text)
-        clf = LogisticRegression(max_iter=1000, solver="lbfgs")
-        clf.fit(x_train, y_train)
-        pred = clf.predict(x_eval)[valid]
-    else:
+    rows: List[Dict[str, Any]] = []
+
+    def add_row(name: str, pred: np.ndarray) -> None:
+        y_valid = y_eval[valid]
+        p_valid = pred[valid]
+        acc = float(accuracy_score(y_valid, p_valid)) if accuracy_score is not None else float((p_valid == y_valid).mean())
+        macro_f1 = float(f1_score(y_valid, p_valid, average="macro")) if f1_score is not None else acc
+        rows.append({
+            "seed": seed,
+            "split": split,
+            "baseline": name,
+            "accuracy": acc,
+            "macro_f1": macro_f1,
+            "n": int(len(y_valid)),
+        })
+
+    if LogisticRegression is not None and len(np.unique(y_train)) > 1:
+        vectorizers = []
+        if CountVectorizer is not None:
+            vectorizers.append(("count_word_12", CountVectorizer(max_features=max_features, ngram_range=(1, 2), min_df=1)))
+        if TfidfVectorizer is not None:
+            vectorizers.extend([
+                ("tfidf_word_13", TfidfVectorizer(max_features=max_features, ngram_range=(1, 3), min_df=1, sublinear_tf=True)),
+                ("tfidf_char_wb_35", TfidfVectorizer(max_features=max_features, analyzer="char_wb", ngram_range=(3, 5), min_df=1, sublinear_tf=True)),
+            ])
+            if FeatureUnion is not None:
+                half = max(128, max_features // 2)
+                vectorizers.append((
+                    "tfidf_word_char_union",
+                    FeatureUnion([
+                        ("word", TfidfVectorizer(max_features=half, ngram_range=(1, 3), min_df=1, sublinear_tf=True)),
+                        ("char", TfidfVectorizer(max_features=half, analyzer="char_wb", ngram_range=(3, 5), min_df=1, sublinear_tf=True)),
+                    ]),
+                ))
+        for name, vec in vectorizers:
+            x_train = vec.fit_transform(train_text)
+            x_eval = vec.transform(eval_text)
+            clf = LogisticRegression(max_iter=2000, solver="lbfgs", C=2.0)
+            clf.fit(x_train, y_train)
+            add_row(name, clf.predict(x_eval))
+    if not rows:
         centroids = {}
         for family, idx in label_to_id.items():
             tokens = set(" ".join(pair.attack_prompt.lower() for pair in train_pairs if pair.family == family).split())
@@ -267,18 +303,12 @@ def lexical_baseline_rows(
             tokens = set(text.lower().split())
             scores = {idx: len(tokens & vocab) for idx, vocab in centroids.items()}
             pred.append(max(scores, key=scores.get))
-        pred = np.array(pred, dtype=int)[valid]
-    y_valid = y_eval[valid]
-    acc = float(accuracy_score(y_valid, pred)) if accuracy_score is not None else float((pred == y_valid).mean())
-    macro_f1 = float(f1_score(y_valid, pred, average="macro")) if f1_score is not None else acc
-    return [{
-        "seed": seed,
-        "split": split,
-        "baseline": "bag_of_words_attack_prompt",
-        "accuracy": acc,
-        "macro_f1": macro_f1,
-        "n": int(len(y_valid)),
-    }]
+        pred = np.array(pred, dtype=int)
+        add_row("token_overlap_fallback", pred)
+    if rows:
+        best = max(rows, key=lambda row: float(row.get("accuracy", 0.0)))
+        rows.append({**best, "baseline": "lexical_best"})
+    return rows
 
 
 def arf_diagnostic_rows(rows: Sequence[Dict[str, Any]], warn_margin: float = 0.05) -> List[Dict[str, Any]]:
