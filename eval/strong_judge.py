@@ -308,6 +308,75 @@ def run_configured_strong_adjudication(rows: List[Dict[str, Any]], cfg: Dict[str
     raise RuntimeError(f"Unknown strong_judge.provider: {provider}")
 
 
+def strong_judge_status(cfg: Dict[str, Any]) -> Dict[str, Any]:
+    judge_cfg = cfg.get("strong_judge", {})
+    enabled = bool(judge_cfg.get("enabled", False))
+    provider = str(judge_cfg.get("provider", "disabled"))
+    status = {
+        "enabled": enabled,
+        "provider": provider,
+        "active": False,
+        "paper_grade": False,
+        "requires_openai_api_key": False,
+        "requires_anthropic_api_key": False,
+        "requires_local_model_download": False,
+        "model": "",
+        "warning": "",
+    }
+    if not enabled:
+        status["warning"] = "Strong adjudication is disabled; reported ASR uses the configured local Gemma judge only."
+        return status
+    if provider in {"openai", "openai_gpt5", "gpt5"}:
+        model = str(judge_cfg.get("openai_model") or "gpt-5")
+        status.update({
+            "active": True,
+            "paper_grade": model.startswith("gpt-5"),
+            "requires_openai_api_key": True,
+            "model": model,
+        })
+        if not os.getenv("OPENAI_API_KEY"):
+            status["warning"] = "OPENAI_API_KEY is not set; GPT-5 adjudication will fail if this config is run."
+        return status
+    if provider in {"anthropic", "claude"}:
+        model = str(judge_cfg.get("anthropic_model") or "")
+        status.update({
+            "active": True,
+            "paper_grade": True,
+            "requires_anthropic_api_key": True,
+            "model": model,
+        })
+        if not os.getenv("ANTHROPIC_API_KEY"):
+            status["warning"] = "ANTHROPIC_API_KEY is not set; Claude adjudication will fail if this config is run."
+        return status
+    if provider in {"local_hf", "free_llm", "huggingface_local"}:
+        status.update({
+            "active": True,
+            "paper_grade": False,
+            "requires_local_model_download": True,
+            "model": str(judge_cfg.get("local_model") or "Qwen/Qwen2.5-1.5B-Instruct"),
+            "warning": "Free local HF adjudication is useful for development, but is not paper-grade replacement for GPT-5/Claude/human labels.",
+        })
+        return status
+    if provider in {"annotations", "external_annotations"}:
+        status.update({
+            "active": True,
+            "paper_grade": True,
+            "model": "external_annotations",
+            "warning": "" if judge_cfg.get("annotation_file") else "annotation_file is missing; external annotation loading will fail.",
+        })
+        return status
+    if provider in {"export_only", "local", "local_heuristic", "free", "free_heuristic"}:
+        status.update({
+            "active": provider != "export_only",
+            "paper_grade": False,
+            "model": provider,
+            "warning": "This provider is not paper-grade; use only for triage/debug.",
+        })
+        return status
+    status["warning"] = f"Unknown strong_judge provider: {provider}"
+    return status
+
+
 def load_external_annotations(path: str | None) -> Dict[str, int]:
     if not path:
         return {}

@@ -34,7 +34,7 @@ from eval.mechanistic_taxonomy import mechanistic_taxonomy_rows
 from eval.metrics import compute_metrics, safe_auprc, safe_auroc
 from eval.null_controls import null_control_rows
 from eval.significance import significance_rows
-from eval.strong_judge import export_strong_judge_requests, run_configured_strong_adjudication
+from eval.strong_judge import export_strong_judge_requests, run_configured_strong_adjudication, strong_judge_status
 from eval.transfer import transfer_rows
 from models.baselines import ActivationProbe, DenseLinearProbe, mean_difference_vector, top_mean_difference_dims
 from models.baselines import TorchMLPProbe
@@ -362,6 +362,36 @@ def _targets(examples: List[ConversationExample]) -> torch.Tensor:
     return torch.tensor([ex.target for ex in examples], dtype=torch.long)
 
 
+def _residual_group_integrity_rows(examples: List[ConversationExample], split_name: str, seed: int) -> List[Dict[str, Any]]:
+    required = {"both_conditions", "only_condition_a", "only_condition_b", "neither_condition"}
+    groups: Dict[str, set] = defaultdict(set)
+    for ex in examples:
+        group = str((ex.metadata or {}).get("residual_group", ""))
+        if group:
+            groups[group].add(ex.mode)
+    rows = []
+    for group, modes in sorted(groups.items()):
+        rows.append({
+            "seed": seed,
+            "split": split_name,
+            "residual_group": group,
+            "n_modes": len(modes),
+            "complete_ctcr_group": required.issubset(modes),
+            "missing_modes": ",".join(sorted(required - modes)),
+        })
+    if groups:
+        rows.append({
+            "seed": seed,
+            "split": split_name,
+            "residual_group": "__summary__",
+            "n_groups": len(groups),
+            "complete_groups": sum(1 for modes in groups.values() if required.issubset(modes)),
+            "complete_ctcr_group": all(required.issubset(modes) for modes in groups.values()),
+            "missing_modes": "",
+        })
+    return rows
+
+
 def _split_and_save(run_dir: Path, name: str, examples: List[ConversationExample], ratios, seed: int, stratify_key: str | None, group_key: str | None = None) -> List[ConversationExample]:
     if group_key:
         splits = deterministic_group_split(examples, ratios, seed, group_key=group_key, stratify_key=stratify_key)
@@ -557,11 +587,14 @@ def score_methods(h_seq: torch.Tensor, models: Dict[str, Any], y: torch.Tensor, 
     out["bilinear_sae_only"] = s2.detach().cpu().numpy()
     out["linear_sae_trajectory"] = (s1 + traj).detach().cpu().numpy()
     out["bilinear_sae_trajectory"] = (s2 + traj).detach().cpu().numpy()
-    if examples is not None and "ctcr_sae" in models and "ctcr_bad_feats" in models:
+    ctcr_valid = np.zeros(h_seq.size(0), dtype=bool)
+    if examples is not None and any((ex.metadata or {}).get("residual_group") for ex in examples) and "ctcr_sae" in models and "ctcr_bad_feats" in models:
         ctcr, _ = ctcr_scores_for_examples(examples, h_seq, models["ctcr_sae"], models["ctcr_bad_feats"])
         out["ctcr_residual_bilinear"] = ctcr.detach().cpu().numpy()
+        ctcr_valid = np.array([bool((ex.metadata or {}).get("residual_group")) for ex in examples], dtype=bool)
     else:
         out["ctcr_residual_bilinear"] = np.zeros(h_seq.size(0), dtype=float)
+    out["ctcr_valid_mask"] = ctcr_valid
     out["full_fused"] = models["fuser"](s1, s2, traj).detach().cpu().numpy()
     return out
 
@@ -833,6 +866,10 @@ def run_seed(seed: int, cfg: Dict[str, Any], run_dir: Path, datasets: Dict[str, 
     ctcr_rows: List[Dict[str, Any]] = []
     for row in ctcr_train_rows:
         ctcr_rows.append({**row, "seed": seed, "eval_slice": "train", "group": "sleeper_distributed_trigger", "method": "ctcr_residual_bilinear"})
+    pd.DataFrame(
+        _residual_group_integrity_rows(selected["train"], "train", seed)
+        + _residual_group_integrity_rows(selected["val"], "val", seed)
+    ).to_csv(run_dir / "raw_metrics" / f"residual_group_integrity_seed_{seed}.csv", index=False)
     layer_rows = layer_summary_rows(train_h, train_y, seed, intercept_layer, "train")
     arf_rows, arf_raw_rows = _run_attack_fingerprints(subject, cfg, selected, intercept_layer, seed, run_dir, logger)
     ppx = _defended_perplexity(subject, cfg, logger)
@@ -848,6 +885,9 @@ def run_seed(seed: int, cfg: Dict[str, Any], run_dir: Path, datasets: Dict[str, 
         scores = score_methods(eval_h, model_bundle, eval_y, examples)
         taxonomy_rows.extend(mechanistic_taxonomy_rows(examples, scores, seed, group))
         ctcr_rows.extend(ctcr_analysis_rows(examples, eval_h, ctcr_sae, ctcr_bad_feats, seed, group))
+        integrity = _residual_group_integrity_rows(examples, group, seed)
+        if integrity:
+            pd.DataFrame(integrity).to_csv(run_dir / "raw_metrics" / f"residual_group_integrity_{group}_seed_{seed}.csv", index=False)
         causal_rows.extend(causal_intervention_rows(examples, eval_h, linear_sae, bilinear_sae, bad_feats, seed, group))
         layer_rows.extend(layer_summary_rows(eval_h, eval_y, seed, intercept_layer, group))
         base_responses, tok_sec = generate_responses(subject, examples, cfg, logger)
@@ -952,6 +992,7 @@ def main() -> None:
 
     device = require_full_experiment_device(bool(cfg.get("require_gpu", True)))
     write_json(run_dir / "raw_metrics" / "gpu_memory_initial.json", cuda_memory_snapshot(device))
+    write_json(run_dir / "raw_metrics" / "strong_judge_status.json", strong_judge_status(cfg))
     log_cuda_memory(logger, "initial", device)
     cfg = tune_batch_sizes_for_memory(cfg, logger, device)
     write_yaml(run_dir / "config_runtime.yaml", cfg)
@@ -1038,11 +1079,12 @@ def main() -> None:
             "issue": "No external sleeper-agent validation set was loaded.",
             "required_fix": "Configure external_sleeper.local_path or external_sleeper.hf_dataset_id and rerun before claiming sleeper-agent generalization.",
         })
-    if str(cfg.get("judge_model", "")) == "google/gemma-3-4b-it" and not bool(cfg.get("strong_judge", {}).get("enabled", False)):
+    judge_status = strong_judge_status(cfg)
+    if str(cfg.get("judge_model", "")) == "google/gemma-3-4b-it" and not bool(judge_status.get("paper_grade", False)):
         validity_warnings.append({
             "severity": "paper_risk",
-            "issue": "Main ASR labels use Gemma 3 4B only.",
-            "required_fix": "For paper-grade main results, adjudicate a held-out sample or full set with GPT-4/Claude/human labels and report agreement.",
+            "issue": "Main ASR labels do not use paper-grade strong adjudication.",
+            "required_fix": "For paper-grade main results, adjudicate a held-out sample or full set with GPT-5/Claude/human labels and report agreement.",
         })
     metrics_df.to_json(run_dir / "raw_metrics" / "metrics.json", orient="records", indent=2)
     metrics_df.to_csv(run_dir / "raw_metrics" / "metrics.csv", index=False)

@@ -44,3 +44,12 @@ def validate_config(cfg: Dict[str, Any]) -> None:
         raise ValueError("Config must include at least one intercept layer.")
     if cfg["lora"]["batch_size"] <= 0 or cfg["sae"]["batch_size"] <= 0 or cfg["fuser"]["batch_size"] <= 0:
         raise ValueError("Batch sizes must be positive.")
+    if bool(cfg.get("publication_mode", False)):
+        sleeper_cfg = cfg.get("external_sleeper", {})
+        if not bool(sleeper_cfg.get("enabled", False)) or not bool(sleeper_cfg.get("required", False)):
+            raise ValueError("publication_mode requires external_sleeper.enabled=true and external_sleeper.required=true.")
+        if not sleeper_cfg.get("local_path") and not sleeper_cfg.get("hf_dataset_id"):
+            raise ValueError("publication_mode requires a real external_sleeper.local_path or external_sleeper.hf_dataset_id.")
+        judge_cfg = cfg.get("strong_judge", {})
+        if not bool(judge_cfg.get("enabled", False)):
+            raise ValueError("publication_mode requires strong_judge.enabled=true.")

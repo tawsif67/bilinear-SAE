@@ -1,0 +1,129 @@
+publication_mode: true
+subject_model: Qwen/Qwen2.5-3B-Instruct
+judge_model: google/gemma-3-4b-it
+multiturn_dataset: ScaleAI/mhj
+echo_chamber_dataset: null
+max_seq_len: 384
+intercept_layers: [-4]
+train_subsample: 4500
+val_subsample: 800
+test_subsample: 1200
+ood_subsample: 900
+output_root: outputs
+require_gpu: true
+real_attack_corpus:
+  enabled: true
+  required: true
+  dataset_id: mvrcii/safety-harmful
+  split: train
+  max_records: 12000
+  min_chars: 12
+external_sleeper:
+  enabled: true
+  required: true
+  source_name: external_sleeper_publication_holdout
+  local_path: /absolute/path/to/external_sleeper_holdout.jsonl
+  hf_dataset_id: null
+  hf_config: null
+  split: train
+  max_records: 1000
+strong_judge:
+  enabled: true
+  provider: local_hf
+  local_model: Qwen/Qwen2.5-1.5B-Instruct
+  max_seq_len: 768
+  batch_size: 4
+  openai_model: gpt-5
+  anthropic_model: null
+  annotation_file: null
+external_datasets:
+  enabled: true
+  datasets:
+    jailbreakbench:
+      enabled: true
+      required: false
+      dataset_id: JailbreakBench/JBB-Behaviors
+      configs: [behaviors, null]
+      splits: [harmful, train]
+      kind: harmful_behavior
+      max_records: 200
+    advbench:
+      enabled: true
+      required: false
+      dataset_id: S3IC/advbench
+      configs: [null]
+      splits: [train]
+      kind: harmful_behavior
+      max_records: 520
+    lakera_gandalf:
+      enabled: true
+      required: false
+      dataset_id: Lakera/gandalf_ignore_instructions
+      configs: [null]
+      splits: [train, validation, test]
+      kind: prompt_injection
+      max_records: 1000
+    deepset_prompt_injections:
+      enabled: true
+      required: false
+      dataset_id: deepset/prompt-injections
+      configs: [null]
+      splits: [train, test]
+      kind: prompt_injection_binary
+      max_records: 662
+lora:
+  r: 16
+  alpha: 32
+  dropout: 0.05
+  epochs: 2
+  batch_size: 4
+  lr: 3e-4
+sae:
+  expansion_factor: 8
+  k_sparse: 64
+  l1_coeff: 0.001
+  bilinear_rank: 64
+  bilinear_l2_coeff: 0.0001
+  steps: 1200
+  batch_size: 48
+  lr: 3e-4
+trajectory_encoder:
+  heads: 4
+  layers: 2
+  dropout: 0.1
+fuser:
+  hidden_dim: 32
+  steps: 800
+  batch_size: 48
+  lr: 3e-4
+attack_fingerprints:
+  enabled: true
+  per_family: 96
+  template_holdout: true
+  holdout_template_variant: 2
+  expansion_factor: 4
+  k_sparse: 32
+  steps: 300
+  batch_size: 32
+  lexical_max_features: 2048
+  lr: 3e-4
+  l1_coeff: 0.001
+  families: [direct_harmful, roleplay_persona, policy_override, obfuscation, refusal_suppression, ordinary_multiturn_drift, sleeper_sequence]
+baselines:
+  mlp_hidden_dim: 128
+  mlp_steps: 300
+  mlp_lr: 1e-3
+eval:
+  batch_size: 4
+  judge_batch_size: 2
+  max_new_tokens: 32
+  thresholds: [inf, 0.90, 0.75, 0.60, 0.45, 0.30, 0.20, 0.10, 0.05]
+  seeds: [42, 123, 456]
+  human_eval_samples: 100
+data:
+  sleeper_per_family: 240
+  sleeper_ood_per_family: 120
+  wikitext_batches: 8
+  audit_examples_per_family: 50
+memory:
+  auto_tune: true

@@ -33,6 +33,8 @@ Shuffled:    h(B+A) - h(B) - h(A) + h(0)
 
 These rows are written with `method=ctcr_formula_ablation` in `raw_metrics/ctcr_residuals.csv`.
 
+A compact theoretical motivation for the low-rank bilinear term is included in `docs/ctcr_theory.md`.
+
 ## Secondary Detector: ARF-SAE
 
 **ARF-SAE is the secondary deployable detector path.** During training it learns sparse residual features from matched attack/control pairs. At test time, the single-pass ARF variant uses:
@@ -239,6 +241,8 @@ strong_judge:
   main.py
   legacy/
     CB-SAE.py
+  docs/
+    ctcr_theory.md
   requirements.txt
   configs/
     default.yaml
@@ -445,6 +449,14 @@ Raw per-threshold outputs are streamed to JSONL without repeated response text. 
 - ARF-SAE: `96` pairs per attack family, `300` SAE steps
 - LoRA, SAE, trajectory, fuser, and evaluation settings
 
+`configs/publication.example.yaml`:
+
+- turns on `publication_mode`
+- requires a real external sleeper holdout via `external_sleeper.local_path` or `external_sleeper.hf_dataset_id`
+- requires `strong_judge.enabled: true`
+- is intentionally not a drop-in config until you replace the placeholder external sleeper path with real data
+- fails during config/load if the publication prerequisites are missing
+
 ## Outputs
 
 Each run creates:
@@ -499,6 +511,9 @@ Important files:
 - `raw_metrics/layer_summary.csv`
 - `raw_metrics/method_manifest.csv`
 - `raw_metrics/validity_warnings.json`
+- `raw_metrics/strong_judge_status.json`
+- `raw_metrics/residual_group_integrity_seed_<seed>.csv`
+- `raw_metrics/residual_group_integrity_<group>_seed_<seed>.csv`
 - `tables/main_results.csv`
 - `tables/significance.csv`
 - `tables/attack_residual_fingerprints.csv`
@@ -529,6 +544,10 @@ Robustness checks now include:
 - template-holdout ARF evaluation where configured
 - lexical leakage baselines: count word n-grams, TF-IDF word n-grams, TF-IDF character n-grams, and combined word+character TF-IDF
 - ARF-SAE vs lexical baseline diagnostics and significance exports
+- CTCR formula ablations against simpler residual alternatives
+- CTCR applicability masks so CTCR is only interpreted on examples with matched residual groups
+- residual-group integrity CSVs to verify subsampling did not break complete A/B/0 CTCR groups
+- strong-judge status JSON showing whether adjudication was active, free/local, or paper-grade
 - synthetic dataset validation CSVs
 - audit-ready CSV samples for constructed sleeper and ARF examples
 - real-prompt-derived provenance fields for ARF transformations
