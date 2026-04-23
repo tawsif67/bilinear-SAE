@@ -170,7 +170,12 @@ def extract_deployable_attack_features(
 def sparse_features_for_residuals(sae, residuals: torch.Tensor) -> np.ndarray:
     if residuals.numel() == 0:
         return np.empty((0, 0), dtype=np.float32)
-    return sae.get_sparse_acts(residuals.float()).float().cpu().numpy()
+    try:
+        sae_device = next(sae.parameters()).device
+    except StopIteration:
+        sae_device = residuals.device
+    sae_inputs = residuals.to(device=sae_device, dtype=torch.float32)
+    return sae.get_sparse_acts(sae_inputs).float().cpu().numpy()
 
 
 def fingerprint_metric_rows(

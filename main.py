@@ -727,6 +727,7 @@ def _run_attack_fingerprints(
     train_resid, train_labels, train_raw = extract_attack_residuals(subject, train_pairs, cfg, intercept_layer, logger)
     train_resid = train_resid.to(subject.device).float()
     arf_sae, arf_clf, arf_stats = train_arf_sae_classifier(train_resid, train_labels, cfg, subject.hidden_size, run_dir / "checkpoints", seed, logger)
+    arf_sae = arf_sae.to(subject.device).eval()
     global_control_baseline = extract_global_control_baseline(subject, train_pairs, cfg, intercept_layer, logger).to(subject.device).float()
     x_train_single, train_single_labels, train_single_raw = extract_deployable_attack_features(
         subject, train_pairs, cfg, intercept_layer, arf_sae, global_control_baseline, logger
