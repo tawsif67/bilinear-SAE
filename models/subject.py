@@ -92,7 +92,9 @@ class SubjectModel(nn.Module):
             handle.remove()
         if not captured:
             raise RuntimeError("Hidden-state hook did not capture any activations.")
-        return captured[0]
+        # Hooks fire under inference_mode during subject forward passes; clone here
+        # so downstream analysis can safely pass activations through trainable modules.
+        return captured[0].clone()
 
     def register_intervention(self, intercept_layer: int, intervention_fn):
         return self.layers()[intercept_layer].register_forward_pre_hook(intervention_fn, with_kwargs=True)
