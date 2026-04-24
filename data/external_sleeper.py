@@ -8,6 +8,7 @@ from typing import Any, Dict, Iterable, List, Tuple
 from datasets import load_dataset
 
 from data.loaders import ConversationExample, conversation_to_prompt, normalize_text
+from utils.hf_auth import hf_auth_kwargs
 
 
 TEXT_FIELDS = (
@@ -148,7 +149,7 @@ def load_external_sleeper_benchmark(cfg: Dict[str, Any]) -> Tuple[List[Conversat
             if sleeper_cfg.get("hf_config") is not None:
                 kwargs["name"] = sleeper_cfg.get("hf_config")
             split = sleeper_cfg.get("split", "train")
-            ds = load_dataset(hf_dataset_id, **kwargs, split=split)
+            ds = load_dataset(hf_dataset_id, **kwargs, split=split, **hf_auth_kwargs())
             rows = [dict(row) for row in ds]
             source_name = normalize_text(sleeper_cfg.get("source_name") or hf_dataset_id.replace("/", "_"))
         else:

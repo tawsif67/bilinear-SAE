@@ -6,6 +6,8 @@ import torch
 import torch.nn as nn
 from transformers import AutoModelForCausalLM, AutoTokenizer, BitsAndBytesConfig
 
+from utils.hf_auth import hf_auth_kwargs
+
 
 def require_full_experiment_device(require_gpu: bool = True) -> torch.device:
     if torch.cuda.is_available():
@@ -53,7 +55,8 @@ class SubjectModel(nn.Module):
         super().__init__()
         self.cfg = cfg
         self.device = device
-        self.tokenizer = AutoTokenizer.from_pretrained(cfg["subject_model"])
+        auth_kwargs = hf_auth_kwargs()
+        self.tokenizer = AutoTokenizer.from_pretrained(cfg["subject_model"], **auth_kwargs)
         if self.tokenizer.pad_token is None:
             self.tokenizer.pad_token = self.tokenizer.eos_token
         self.tokenizer.truncation_side = "left"
@@ -64,6 +67,7 @@ class SubjectModel(nn.Module):
             kwargs["device_map"] = {"": 0}
         elif device.type == "cuda":
             kwargs["torch_dtype"] = torch.bfloat16
+        kwargs.update(auth_kwargs)
         self.model = AutoModelForCausalLM.from_pretrained(cfg["subject_model"], **kwargs)
         if bnb is None:
             self.model.to(device)

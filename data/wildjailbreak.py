@@ -5,6 +5,7 @@ from typing import Any, Dict, List
 from datasets import load_dataset
 
 from data.loaders import ConversationExample, conversation_to_prompt, dedupe_examples, normalize_text
+from utils.hf_auth import hf_auth_kwargs
 
 
 WILDJAILBREAK_ID = "allenai/wildjailbreak"
@@ -12,7 +13,7 @@ WILDJAILBREAK_ID = "allenai/wildjailbreak"
 
 def _load_config(config_name: str):
     try:
-        return load_dataset(WILDJAILBREAK_ID, config_name, delimiter="\t", keep_default_na=False)
+        return load_dataset(WILDJAILBREAK_ID, config_name, delimiter="\t", keep_default_na=False, **hf_auth_kwargs())
     except Exception as e:
         msg = str(e)
         if "gated" in msg.lower() or "401" in msg or "403" in msg or "authorized" in msg.lower():

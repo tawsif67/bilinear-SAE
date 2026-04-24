@@ -6,6 +6,7 @@ from typing import Any, Dict, List
 from datasets import load_dataset
 
 from data.loaders import ConversationExample, conversation_to_prompt, dedupe_examples, normalize_text
+from utils.hf_auth import hf_auth_kwargs
 
 
 MHJ_ID = "ScaleAI/mhj"
@@ -70,7 +71,7 @@ def _load_scaleai_mhj_rows(dataset_id: str) -> tuple[Dict[str, Any], str]:
     errors = []
     for filename in MHJ_CONVERSATION_FILES:
         try:
-            path = hf_hub_download(repo_id=dataset_id, repo_type="dataset", filename=filename)
+            path = hf_hub_download(repo_id=dataset_id, repo_type="dataset", filename=filename, **hf_auth_kwargs())
             df = pd.read_csv(path, keep_default_na=False)
             return {"train": df.to_dict(orient="records")}, filename
         except Exception as e:
@@ -91,7 +92,7 @@ def load_multiturn_jailbreak(cfg: Dict[str, Any]) -> tuple[List[ConversationExam
         note = f"{note} Loaded `{loaded_file}` directly because the HF auto-builder mixes incompatible repo files."
     else:
         try:
-            ds_dict = load_dataset(dataset_id)
+            ds_dict = load_dataset(dataset_id, **hf_auth_kwargs())
         except Exception as e:
             raise RuntimeError(f"Failed to load multi-turn jailbreak dataset `{dataset_id}`: {e}") from e
 

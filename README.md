@@ -384,6 +384,18 @@ Debug mode uses the same fixed model IDs but smaller subsamples, fewer training 
 python main.py --config configs/debug.yaml
 ```
 
+If you want to pass a Hugging Face token up front instead of relying on `huggingface-cli login`, use:
+
+```bash
+python main.py --config configs/debug.yaml --hf-token hf_xxx
+```
+
+Safer option:
+
+```bash
+python main.py --config configs/debug.yaml --hf-token-file /path/to/hf_token.txt
+```
+
 Windows helper:
 
 ```cmd
@@ -401,6 +413,12 @@ Debug mode is still a real model/data run. It can fail if:
 
 ```bash
 python main.py --config configs/default.yaml
+```
+
+With an explicit Hugging Face token:
+
+```bash
+python main.py --config configs/default.yaml --hf-token hf_xxx
 ```
 
 Windows helper:

@@ -7,6 +7,7 @@ from typing import Any, Dict, List
 from datasets import load_dataset
 
 from data.loaders import normalize_text
+from utils.hf_auth import hf_auth_kwargs
 
 
 DEFAULT_REAL_ATTACK_CORPUS_ID = "mvrcii/safety-harmful"
@@ -77,7 +78,7 @@ def load_real_attack_corpus(cfg: Dict[str, Any]) -> List[Dict[str, Any]]:
     max_records = int(corpus_cfg.get("max_records", 0))
     min_chars = int(corpus_cfg.get("min_chars", 12))
     try:
-        ds = load_dataset(dataset_id, split=split)
+        ds = load_dataset(dataset_id, split=split, **hf_auth_kwargs())
     except Exception as e:
         if bool(corpus_cfg.get("required", True)):
             raise RuntimeError(

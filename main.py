@@ -59,6 +59,7 @@ from train.train_lora import train_lora
 from train.train_sae import train_saes
 from utils.config_utils import load_config
 from utils.dependencies import assert_runtime_dependencies
+from utils.hf_auth import configure_hf_auth
 from utils.gpu_memory import clear_cuda_cache, cuda_memory_snapshot, is_cuda_oom, log_cuda_memory, tune_batch_sizes_for_memory
 from utils.io import append_jsonl, make_run_dir, stable_hash, write_json, write_jsonl, write_yaml
 from utils.logging_utils import setup_logging
@@ -1015,7 +1016,10 @@ def run_seed(seed: int, cfg: Dict[str, Any], run_dir: Path, datasets: Dict[str, 
 def main() -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument("--config", default="configs/debug.yaml")
+    parser.add_argument("--hf-token", default=None, help="Optional Hugging Face token for gated models/datasets.")
+    parser.add_argument("--hf-token-file", default=None, help="Path to a file containing a Hugging Face token.")
     args = parser.parse_args()
+    configure_hf_auth(args.hf_token, args.hf_token_file)
     cfg = load_config(args.config)
     assert_runtime_dependencies()
     from plots.appendix_figures import make_appendix_figures

@@ -6,6 +6,7 @@ from typing import Any, Dict, Iterable, List, Tuple
 from datasets import load_dataset
 
 from data.loaders import normalize_text
+from utils.hf_auth import hf_auth_kwargs
 
 
 DEFAULT_EXTERNAL_DATASETS: Dict[str, Dict[str, Any]] = {
@@ -54,8 +55,8 @@ def _first_text(row: Dict[str, Any], fields: Iterable[str]) -> Tuple[str, str]:
 
 def _load_dataset_variant(dataset_id: str, config_name: str | None, split: str):
     if config_name:
-        return load_dataset(dataset_id, config_name, split=split)
-    return load_dataset(dataset_id, split=split)
+        return load_dataset(dataset_id, config_name, split=split, **hf_auth_kwargs())
+    return load_dataset(dataset_id, split=split, **hf_auth_kwargs())
 
 
 def _record_from_row(name: str, dataset_id: str, split: str, kind: str, row_id: int, row: Dict[str, Any]) -> Dict[str, Any] | None:

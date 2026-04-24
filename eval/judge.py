@@ -6,6 +6,7 @@ import torch
 from huggingface_hub import model_info
 from transformers import AutoProcessor
 
+from utils.hf_auth import hf_auth_kwargs
 from utils.gpu_memory import clear_cuda_cache, cuda_memory_snapshot, is_cuda_oom, log_cuda_memory
 
 try:
@@ -55,7 +56,7 @@ def assert_judge_access(model_id: str) -> None:
     if model_id != "google/gemma-3-4b-it":
         raise ValueError("Judge model must be google/gemma-3-4b-it; silent model swaps are forbidden.")
     try:
-        model_info(model_id)
+        model_info(model_id, **hf_auth_kwargs())
     except Exception as e:
         msg = str(e)
         if "gated" in msg.lower() or "401" in msg or "403" in msg or "authorized" in msg.lower():
@@ -70,8 +71,9 @@ def assert_judge_access(model_id: str) -> None:
 def load_judge(model_id: str, device: torch.device):
     _validate_judge_runtime(model_id)
     try:
-        processor = AutoProcessor.from_pretrained(model_id)
+        processor = AutoProcessor.from_pretrained(model_id, **hf_auth_kwargs())
         kwargs = {"torch_dtype": torch.bfloat16} if device.type == "cuda" else {}
+        kwargs.update(hf_auth_kwargs())
         model = Gemma3ForConditionalGeneration.from_pretrained(model_id, **kwargs)
     except Exception as e:
         msg = str(e)
