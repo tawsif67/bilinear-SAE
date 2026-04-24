@@ -164,6 +164,7 @@ def ctcr_scores_for_examples(
     return scores, rows
 
 
+@torch.inference_mode()
 def ctcr_analysis_rows(
     examples: List[ConversationExample],
     h_seq: torch.Tensor,

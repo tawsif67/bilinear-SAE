@@ -814,6 +814,10 @@ def run_seed(seed: int, cfg: Dict[str, Any], run_dir: Path, datasets: Dict[str, 
         ctcr_bad = ctcr_residuals[ctcr_targets == 1]
         ctcr_clean = ctcr_residuals[ctcr_targets == 0]
         ctcr_bad_feats = _rank_features(ctcr_sae.get_sparse_acts(ctcr_bad).cpu().numpy(), ctcr_sae.get_sparse_acts(ctcr_clean).cpu().numpy(), device)
+    # _rank_features() runs under inference_mode here, so clone the resulting
+    # index tensors after leaving the context before reusing them elsewhere.
+    bad_feats = {name: feats.clone() for name, feats in bad_feats.items()}
+    ctcr_bad_feats = ctcr_bad_feats.clone()
     trajectory, fuser, fuser_stats = train_fuser(train_h, train_y, linear_sae, bilinear_sae, bad_feats, cfg, subject.hidden_size, run_dir / "checkpoints", seed, logger)
 
     dense = DenseLinearProbe()
